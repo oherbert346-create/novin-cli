@@ -44,21 +44,27 @@ def _client_from_session(
     )
 
 
+def prompt_line(message: str) -> str:
+    console.print(message, end="")
+    try:
+        return input().strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        sys.exit(1)
+
+
 def _login_interactive(*, first_time: bool, api_url: str, brand_id: str | None) -> NovinClient:
     console.print()
     if first_time:
         console.print("[bold]Welcome to Novin.[/bold]")
-        console.print("This machine doesn't have a brand yet.")
-        console.print("Paste your [cyan]master key[/cyan] to set up the CLI.")
+        console.print("Paste the [cyan]master key[/cyan] Novin gave you.")
+        console.print("We'll create your brand and give you an API key for sending events.")
         prompt = "Master key: "
-        kind: cli_session.AccountKind = "master"
-        brand = (brand_id or "default").strip() or "default"
     else:
         brand = (brand_id or cli_session.saved_brand_id()).strip() or "default"
         console.print("[bold]Welcome back.[/bold]")
-        console.print(f"You're signed out. Paste the [cyan]API key[/cyan] for brand [bold]{brand}[/bold].")
+        console.print(f"Paste the [cyan]API key[/cyan] for [bold]{brand}[/bold].")
         prompt = "API key: "
-        kind = "brand"
     console.print()
     try:
         key = getpass(prompt).strip()
@@ -68,16 +74,52 @@ def _login_interactive(*, first_time: bool, api_url: str, brand_id: str | None) 
     if not key:
         console.print("[red]No key entered.[/red]")
         sys.exit(1)
-    client = NovinClient(api_url=api_url, api_key=key, brand_id=brand)
-    ok, detail = client.verify_credentials()
-    if not ok:
-        console.print(f"[red]Could not sign in:[/red] {detail}")
-        sys.exit(1)
-    cli_session.save_session(api_url=api_url, api_key=key, brand_id=brand, kind=kind)
-    console.print(f"[green]Signed in[/green] as brand [bold]{brand}[/bold].")
-    if first_time:
-        console.print("If you sign out later, run [bold]novin[/bold] and paste your [cyan]API key[/cyan].")
-    return client
+    guessed = (brand_id or "").strip()
+    if not guessed and not first_time:
+        guessed = cli_session.saved_brand_id()
+    client = NovinClient(api_url=api_url, api_key=key, brand_id=guessed or "default")
+    kind_found, data = client.identify_key()
+    if kind_found == "master":
+        name = prompt_line("Brand name: ")
+        if not name:
+            console.print("[red]Brand name is required.[/red]")
+            sys.exit(1)
+        created = client.create_brand(name)
+        brand = str(created.get("brand_id") or "")
+        brand_name = str(created.get("brand_name") or name)
+        api_key = str(created.get("api_key") or "")
+        if not brand or not api_key:
+            console.print("[red]Could not create the brand.[/red]")
+            sys.exit(1)
+        client = NovinClient(api_url=api_url, api_key=api_key, brand_id=brand)
+        cli_session.save_session(
+            api_url=api_url,
+            api_key=api_key,
+            brand_id=brand,
+            kind="brand",
+            brand_name=brand_name,
+        )
+        console.print()
+        console.print(f"[green]Brand ready:[/green] [bold]{brand_name}[/bold]  ({brand})")
+        console.print("Your [cyan]API key[/cyan] — save it. Use it to sign in and to send events:")
+        console.print(f"  [bold]{api_key}[/bold]")
+        console.print("[dim]Novin will not show this key again. This machine is signed in with it.[/dim]")
+        return client
+    if kind_found == "brand":
+        brand = str(data.get("brand_id") or brand_id or client.brand_id)
+        brand_name = str(data.get("brand_name") or brand)
+        client.brand_id = brand
+        cli_session.save_session(
+            api_url=api_url,
+            api_key=key,
+            brand_id=brand,
+            kind="brand",
+            brand_name=brand_name,
+        )
+        console.print(f"[green]Signed in[/green] as [bold]{brand_name}[/bold].")
+        return client
+    console.print("[red]Could not sign in:[/red] that key was not accepted")
+    sys.exit(1)
 
 
 def ensure_logged_in(
@@ -90,16 +132,18 @@ def ensure_logged_in(
     flag_key = (api_key or _env_api_key() or "").strip()
     if flag_key:
         client = _client_from_session(api_url=url, api_key=flag_key, brand_id=brand_id)
-        ok, detail = client.verify_credentials()
-        if not ok:
-            console.print(f"[red]Key was not accepted:[/red] {detail}")
+        kind_found, data = client.identify_key()
+        if kind_found != "brand":
+            console.print("[red]Key was not accepted.[/red] Use your brand API key, not the master key.")
             sys.exit(1)
-        already = cli_session.has_brand_account()
+        if data.get("brand_id"):
+            client.brand_id = str(data["brand_id"])
         cli_session.save_session(
             api_url=client.api_url,
             api_key=client.api_key,
             brand_id=client.brand_id,
-            kind="brand" if already else "master",
+            kind="brand",
+            brand_name=str(data.get("brand_name") or client.brand_id),
         )
         return client
     saved = cli_session.load_session()
@@ -152,8 +196,8 @@ class _NovinGroup(click.Group):
 def cli(ctx: click.Context, api_url: str | None, api_key: str | None, brand_id: str | None):
     """Open the Novin terminal UI on this machine.
 
-    Run `novin` with no arguments. First time: master key.
-    Signed out with a brand already on this machine: API key.
+    Run `novin` with no arguments. First time: master key, then a brand name.
+    We generate your API key. After that, this machine stays signed in.
     """
     ctx.ensure_object(dict)
     ctx.obj["api_url"] = api_url
@@ -510,10 +554,32 @@ def ingest():
     pass
 
 
+def _site_and_camera(client: NovinClient, site_id: str, camera_id: str) -> tuple[str, str]:
+    """Use the saved site and its first camera so sending an event is one command."""
+    cfg = client._get_active_site_config()
+    sites = cfg.get("sites") or {}
+    sid = (site_id or "").strip() or str(cfg.get("active_site_id") or "")
+    if not sid and len(sites) == 1:
+        sid = str(next(iter(sites)))
+    if not sid:
+        console.print("[red]Create a site first.[/red] Run [bold]novin[/bold] and add one on Sites.")
+        raise SystemExit(1)
+    cached = sites.get(sid) if isinstance(sites, dict) else {}
+    cams: list[str] = []
+    if isinstance(cached, dict):
+        raw = cached.get("cameras") or []
+        if isinstance(raw, list):
+            cams = [str(item).strip() for item in raw if str(item).strip()]
+        else:
+            cams = [part.strip() for part in str(raw).split(",") if part.strip()]
+    cam = (camera_id or "").strip() or (cams[0] if cams else "cam_01")
+    return sid, cam
+
+
 @ingest.command("image")
 @click.argument("image_path", type=click.Path(exists=True))
-@click.option("--site-id", default="", help="Site identifier (defaults to active site)")
-@click.option("--camera-id", default="cam_01", help="Camera identifier")
+@click.option("--site-id", default="", help="Site. Defaults to the one on this machine.")
+@click.option("--camera-id", default="", help="Camera. Defaults to the site's first camera.")
 @click.option("--zone", default=None, help="Camera zone for this event (omit to keep the stored site)")
 @click.option("--site-type", default=None, help="Override site type for this event (omit to keep the stored site)")
 @click.option("--after-hours", is_flag=True, help="Flag after-hours lighting/period")
@@ -524,10 +590,9 @@ def ingest():
 def ingest_image(ctx: click.Context, image_path: str, site_id: str, camera_id: str, zone: str, site_type: str, after_hours: bool, low_light: bool, beta: bool, out_format: str):
     """Synchronously ingest a single image and display the AI verdict."""
     client = _require_client(ctx)
-    active_cfg = client._get_active_site_config()
-    target_site_id = site_id or active_cfg.get("active_site_id") or "site_office_main"
+    target_site_id, camera_id = _site_and_camera(client, site_id, camera_id)
 
-    console.print(f"[dim]Ingesting {Path(image_path).name} to {target_site_id}/{camera_id} {'[cyan](BETA REASONING ACTIVE)[/cyan]' if beta else ''}...[/dim]")
+    console.print(f"[dim]Sending {Path(image_path).name} from {target_site_id}/{camera_id}...[/dim]")
     try:
         verdict, wall_ms = client.ingest_image(
             image_path_or_b64=Path(image_path),
@@ -551,7 +616,7 @@ def ingest_image(ctx: click.Context, image_path: str, site_id: str, camera_id: s
 @ingest.command("burst")
 @click.argument("image_paths", nargs=-1, required=True, type=click.Path(exists=True))
 @click.option("--site-id", default="", help="Site identifier (defaults to active site)")
-@click.option("--camera-id", default="cam_perimeter_02", help="Camera identifier")
+@click.option("--camera-id", default="", help="Camera. Defaults to the site's first camera.")
 @click.option("--zone", default=None, help="Camera zone for this event")
 @click.option("--site-type", default=None, help="Override site type for this event")
 @click.option("--format", "out_format", type=click.Choice(["card", "json"]), default="card")
@@ -559,9 +624,8 @@ def ingest_image(ctx: click.Context, image_path: str, site_id: str, camera_id: s
 def ingest_burst(ctx: click.Context, image_paths: tuple[str, ...], site_id: str, camera_id: str, zone: str | None, site_type: str | None, out_format: str):
     """Submit a multi-frame burst and execute zero-delay long-polling."""
     client = _require_client(ctx)
-    active_cfg = client._get_active_site_config()
-    target_site_id = site_id or active_cfg.get("active_site_id") or "site_warehouse_south"
-    console.print(f"[dim]Submitting {len(image_paths)} frames for burst joint analysis...[/dim]")
+    target_site_id, camera_id = _site_and_camera(client, site_id, camera_id)
+    console.print(f"[dim]Sending {len(image_paths)} frames from {target_site_id}/{camera_id}...[/dim]")
     try:
         verdict, submit_ms, total_ms = client.ingest_burst_and_poll(
             image_paths=list(image_paths),
@@ -583,7 +647,7 @@ def ingest_burst(ctx: click.Context, image_paths: tuple[str, ...], site_id: str,
 @ingest.command("video")
 @click.argument("video_path", type=click.Path(exists=True))
 @click.option("--site-id", default="", help="Site identifier (defaults to active site)")
-@click.option("--camera-id", default="cam_perimeter_02", help="Camera identifier")
+@click.option("--camera-id", default="", help="Camera. Defaults to the site's first camera.")
 @click.option("--zone", default=None, help="Camera zone for this event")
 @click.option("--site-type", default=None, help="Override site type for this event")
 @click.option("--format", "out_format", type=click.Choice(["card", "json"]), default="card")
@@ -591,9 +655,8 @@ def ingest_burst(ctx: click.Context, image_paths: tuple[str, ...], site_id: str,
 def ingest_video(ctx: click.Context, video_path: str, site_id: str, camera_id: str, zone: str | None, site_type: str | None, out_format: str):
     """Submit a video clip and execute zero-delay long-polling."""
     client = _require_client(ctx)
-    active_cfg = client._get_active_site_config()
-    target_site_id = site_id or active_cfg.get("active_site_id") or "site_warehouse_south"
-    console.print(f"[dim]Submitting video {Path(video_path).name} for keyframe sampling...[/dim]")
+    target_site_id, camera_id = _site_and_camera(client, site_id, camera_id)
+    console.print(f"[dim]Sending {Path(video_path).name} from {target_site_id}/{camera_id}...[/dim]")
     try:
         verdict, submit_ms, total_ms = client.ingest_video_and_poll(
             video_path=Path(video_path),

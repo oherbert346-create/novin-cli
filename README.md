@@ -24,8 +24,21 @@ export PATH="$HOME/.local/bin:$PATH"
 novin
 ```
 
-- First time: paste the **master key** Novin gave you.
-- After that: paste the **API key** for your brand.
+First time:
+
+1. Paste the **master key** Novin gave you.
+2. Type a **brand name** (your company).
+3. Novin creates a **brand id** and an **API key** and shows the key once. Save it.
+
+This machine stays signed in. Sending an event is:
+
+```bash
+novin ingest image ./frame.jpg
+```
+
+after you add a site once. Site and camera are filled in from that.
+
+If you sign out, or use another computer, paste the **API key** we showed you — not the master key.
 
 A new install always gets the current terminal. If you already have it, it stays as-is until you update.
 

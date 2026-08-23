@@ -52,21 +52,35 @@ class NovinClient:
             }
 
     def verify_credentials(self) -> tuple[bool, str]:
-        """Return (ok, detail). 200 on brand setup means the key is valid for this brand."""
+        """Return (ok, detail). 200 on /me means the key belongs to a brand."""
         try:
-            with httpx.Client(timeout=10.0) as client:
-                r = client.get(
-                    f"{self.api_url}/api/v1/brand/setup",
-                    headers=self._headers(),
-                    params={"brand_id": self.brand_id},
-                )
-            if r.status_code == 200:
+            kind, data = self.identify_key()
+            if kind == "brand":
+                if data.get("brand_id"):
+                    self.brand_id = str(data["brand_id"])
                 return True, "ok"
-            if r.status_code == 401:
-                return False, "that key was not accepted"
-            return False, f"server returned {r.status_code}"
+            if kind == "master":
+                return False, "master"
+            return False, "that key was not accepted"
         except Exception as exc:
             return False, str(exc)[:160]
+
+    def identify_key(self) -> tuple[str, dict[str, Any]]:
+        """Classify this key: brand, master, or invalid."""
+        with httpx.Client(timeout=10.0) as client:
+            r = client.get(f"{self.api_url}/api/v1/me", headers=self._headers())
+        if r.status_code == 200:
+            data = r.json() if isinstance(r.json(), dict) else {}
+            return "brand", data
+        if r.status_code == 403:
+            return "master", {}
+        if r.status_code == 401:
+            return "invalid", {}
+        return "invalid", {"status": r.status_code}
+
+    def create_brand(self, name: str) -> dict[str, Any]:
+        """Master key only. Creates a brand and returns a one-time API key."""
+        return self._request_json("POST", "/api/v1/account", json={"name": name})
 
     @staticmethod
     def _error_detail(response: httpx.Response) -> str:

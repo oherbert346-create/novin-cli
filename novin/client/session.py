@@ -59,6 +59,7 @@ def save_session(
     api_key: str,
     brand_id: str,
     kind: AccountKind,
+    brand_name: str | None = None,
 ) -> dict[str, Any]:
     session = {
         "api_url": api_url,
@@ -67,11 +68,15 @@ def save_session(
         "kind": kind,
         "logged_in": True,
     }
+    if brand_name:
+        session["brand_name"] = brand_name
     _write_json(session_path(), session)
     cfg = load_config()
     account = dict(cfg.get("account") or {})
     account["brand_id"] = brand_id
     account["kind"] = kind
+    if brand_name:
+        account["brand_name"] = brand_name
     cfg["account"] = account
     save_config(cfg)
     return session
