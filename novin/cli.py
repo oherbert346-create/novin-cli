@@ -1,0 +1,677 @@
+from __future__ import annotations
+
+import json
+import os
+import sys
+from getpass import getpass
+from pathlib import Path
+
+import click
+from rich.console import Console
+from rich.table import Table
+
+from novin.client.api_client import NovinClient
+from novin.client import session as cli_session
+from novin.ui.labels import ENV_HELP as _ENV_HELP
+from novin.ui.verdict_card import render_verdict_card
+
+console = Console()
+
+
+def _env_api_key() -> str:
+    return (os.environ.get("NOVIN_API_KEY") or "").strip()
+
+
+def _client_from_session(
+    *,
+    api_url: str | None = None,
+    api_key: str | None = None,
+    brand_id: str | None = None,
+) -> NovinClient:
+    saved = cli_session.load_session() or {}
+    return NovinClient(
+        api_url=api_url
+        or os.environ.get("NOVIN_API_URL")
+        or saved.get("api_url")
+        or cli_session.default_api_url(),
+        api_key=api_key or _env_api_key() or saved.get("api_key") or "",
+        brand_id=brand_id
+        or os.environ.get("NOVIN_BRAND_ID")
+        or saved.get("brand_id")
+        or cli_session.saved_brand_id(),
+    )
+
+
+def _login_interactive(*, first_time: bool, api_url: str, brand_id: str | None) -> NovinClient:
+    console.print()
+    if first_time:
+        console.print("[bold]Welcome to Novin.[/bold]")
+        console.print("This machine doesn't have a brand yet.")
+        console.print("Paste your [cyan]master key[/cyan] to set up the CLI.")
+        prompt = "Master key: "
+        kind: cli_session.AccountKind = "master"
+        brand = (brand_id or "default").strip() or "default"
+    else:
+        brand = (brand_id or cli_session.saved_brand_id()).strip() or "default"
+        console.print("[bold]Welcome back.[/bold]")
+        console.print(f"You're signed out. Paste the [cyan]API key[/cyan] for brand [bold]{brand}[/bold].")
+        prompt = "API key: "
+        kind = "brand"
+    console.print()
+    try:
+        key = getpass(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        sys.exit(1)
+    if not key:
+        console.print("[red]No key entered.[/red]")
+        sys.exit(1)
+    client = NovinClient(api_url=api_url, api_key=key, brand_id=brand)
+    ok, detail = client.verify_credentials()
+    if not ok:
+        console.print(f"[red]Could not sign in:[/red] {detail}")
+        sys.exit(1)
+    cli_session.save_session(api_url=api_url, api_key=key, brand_id=brand, kind=kind)
+    console.print(f"[green]Signed in[/green] as brand [bold]{brand}[/bold].")
+    if first_time:
+        console.print("If you sign out later, run [bold]novin[/bold] and paste your [cyan]API key[/cyan].")
+    return client
+
+
+def ensure_logged_in(
+    *,
+    api_url: str | None,
+    api_key: str | None,
+    brand_id: str | None,
+) -> NovinClient:
+    url = api_url or os.environ.get("NOVIN_API_URL") or cli_session.default_api_url()
+    flag_key = (api_key or _env_api_key() or "").strip()
+    if flag_key:
+        client = _client_from_session(api_url=url, api_key=flag_key, brand_id=brand_id)
+        ok, detail = client.verify_credentials()
+        if not ok:
+            console.print(f"[red]Key was not accepted:[/red] {detail}")
+            sys.exit(1)
+        already = cli_session.has_brand_account()
+        cli_session.save_session(
+            api_url=client.api_url,
+            api_key=client.api_key,
+            brand_id=client.brand_id,
+            kind="brand" if already else "master",
+        )
+        return client
+    saved = cli_session.load_session()
+    if saved and saved.get("api_key"):
+        return _client_from_session(api_url=url, brand_id=brand_id)
+    return _login_interactive(
+        first_time=not cli_session.has_brand_account(),
+        api_url=url,
+        brand_id=brand_id,
+    )
+
+
+def run_tui(client: NovinClient) -> None:
+    """Open the local terminal UI. Textual is imported only when launched."""
+    from novin.ui.app import run_tui as launch
+
+    launch(client)
+
+
+def _require_client(ctx: click.Context) -> NovinClient:
+    ctx.ensure_object(dict)
+    client = ctx.obj.get("client")
+    if client is not None:
+        return client
+    client = ensure_logged_in(
+        api_url=ctx.obj.get("api_url"),
+        api_key=ctx.obj.get("api_key"),
+        brand_id=ctx.obj.get("brand_id"),
+    )
+    ctx.obj["client"] = client
+    return client
+
+
+class _NovinGroup(click.Group):
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        return list(self.commands)
+
+
+@click.group(
+    name="novin",
+    cls=_NovinGroup,
+    invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.option("--api-url", default=None, help="Novin API URL")
+@click.option("--api-key", default=None, help="Key (skips the login prompt)")
+@click.option("--brand-id", default=None, help="Brand id")
+@click.pass_context
+def cli(ctx: click.Context, api_url: str | None, api_key: str | None, brand_id: str | None):
+    """Open the Novin terminal UI on this machine.
+
+    Run `novin` with no arguments. First time: master key.
+    Signed out with a brand already on this machine: API key.
+    """
+    ctx.ensure_object(dict)
+    ctx.obj["api_url"] = api_url
+    ctx.obj["api_key"] = api_key
+    ctx.obj["brand_id"] = brand_id
+    ctx.obj["client"] = None
+    if ctx.invoked_subcommand is None:
+        client = ensure_logged_in(api_url=api_url, api_key=api_key, brand_id=brand_id)
+        ctx.obj["client"] = client
+        run_tui(client)
+
+
+@cli.command("login")
+@click.pass_context
+def login_cmd(ctx: click.Context):
+    """Sign in (master key first time, API key after)."""
+    url = ctx.obj.get("api_url") or os.environ.get("NOVIN_API_URL") or cli_session.default_api_url()
+    client = _login_interactive(
+        first_time=not cli_session.has_brand_account(),
+        api_url=url,
+        brand_id=ctx.obj.get("brand_id"),
+    )
+    ctx.obj["client"] = client
+
+
+@cli.command("logout")
+def logout_cmd():
+    """Sign out (next time use your API key)."""
+    cli_session.clear_session()
+    if cli_session.has_brand_account():
+        console.print(
+            f"[green]Signed out.[/green] Run [bold]novin[/bold] and paste the "
+            f"API key for brand [bold]{cli_session.saved_brand_id()}[/bold]."
+        )
+    else:
+        console.print("[green]Signed out.[/green] Run [bold]novin[/bold] and paste your master key.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# novin setup
+# ─────────────────────────────────────────────────────────────────────────────
+
+@cli.group()
+def setup():
+    """Tenant provisioning and connectivity diagnostics."""
+    pass
+
+
+@setup.command("check")
+@click.pass_context
+def setup_check(ctx: click.Context):
+    """Check connectivity and readiness of the Novin API cluster."""
+    client = _require_client(ctx)
+    console.print(f"[cyan]Probing Novin cluster at[/cyan] [bold]{client.api_url}[/bold]...")
+    res = client.ping()
+
+    table = Table(title="Novin API Connectivity & Readiness", border_style="cyan")
+    table.add_column("Probe", style="bold")
+    table.add_column("Status")
+    table.add_column("Latency (ms)", justify="right")
+
+    health_status = "[green]ONLINE (200)[/green]" if res["health"].get("status") == "ok" else f"[red]ERROR ({res['health']})[/red]"
+    ready_status = "[green]READY (200)[/green]" if res["ready"].get("status") == "ready" else f"[yellow]{res['ready']}[/yellow]"
+
+    table.add_row("Health Probe (/health)", health_status, str(res["health_ms"]))
+    table.add_row("Readiness Probe (/ready)", ready_status, str(res["ready_ms"]))
+    table.add_row("Auth Scope", f"Brand: [bold]{client.brand_id}[/bold]", "-")
+    console.print(table)
+
+
+@setup.command("site")
+@click.argument("site_id")
+@click.option("--name", default="", help="Human-readable site name")
+@click.option("--type", "site_type", default="office_retail", help="Guesses environment if --environment is omitted (office, warehouse, industrial, retail, school, transit)")
+@click.option("--hours", default="", help="Expected operating hours (optional; omit if none)")
+@click.option("--timezone", default="", help="IANA timezone for local clock (empty = UTC)")
+@click.option("--zone", "zones", multiple=True, help="Restricted zones (e.g. --zone server_room --zone perimeter)")
+@click.option("--asset", "assets", multiple=True, help="Critical assets (e.g. --asset main_breaker)")
+@click.option("--benign-pattern", "benign_patterns", multiple=True, help="Known benign activity (e.g. --benign-pattern 'night cleaning crew')")
+@click.option("--note", "notes", multiple=True, help="Temporary notes (e.g. --note 'HVAC repair crew expected on roof')")
+@click.option("--policy", "policies", multiple=True, help="Standing alert instruction (e.g. --policy 'missing hard hats in work zones')")
+@click.option("--environment", default="", help=_ENV_HELP)
+@click.option("--brief", "--context", "brief", default="", help="Natural-language site context. What is normal here and what to watch for.")
+@click.option("--focus", default="", help="Legacy security-job id. Prefer --brief.")
+@click.option("--secondary", "secondaries", multiple=True, help="Legacy secondary focus (max 2). Prefer --brief.")
+@click.option("--depth", "output_depth", default="compact", help="compact or operator")
+@click.pass_context
+def setup_site(ctx: click.Context, site_id: str, name: str, site_type: str, hours: str, timezone: str, zones: tuple[str, ...], assets: tuple[str, ...], benign_patterns: tuple[str, ...], notes: tuple[str, ...], policies: tuple[str, ...], environment: str, brief: str, focus: str, secondaries: tuple[str, ...], output_depth: str):
+    """Provision a digital site with operational DNA context."""
+    client = _require_client(ctx)
+    console.print(f"[cyan]Provisioning site[/cyan] [bold]{site_id}[/bold]...")
+    res = client.setup_site(
+        site_id=site_id,
+        site_name=name or site_id,
+        site_type=site_type,
+        expected_hours=hours or None,
+        timezone=timezone or None,
+        restricted_zones=list(zones),
+        critical_assets=list(assets),
+        known_benign_patterns=list(benign_patterns),
+        temporary_notes=list(notes),
+        policies=list(policies),
+        environment=environment or None,
+        brief=brief or None,
+        focus=focus or None,
+        secondary_focuses=list(secondaries),
+        output_depth=output_depth or "compact",
+    )
+    console.print(f"[bold green]✓ Site Registered:[/bold green] {res.get('site_id')} (Brand: {res.get('brand_id')})")
+    if res.get("message"):
+        console.print(f"[dim]{res.get('message')}[/dim]")
+
+
+@setup.command("delete-site")
+@click.argument("site_id")
+@click.pass_context
+def setup_delete_site(ctx: click.Context, site_id: str):
+    """Delete one site for this brand."""
+    client = _require_client(ctx)
+    res = client.delete_site(site_id)
+    console.print(f"[green]Deleted[/green] {res.get('site_id')} for brand {res.get('brand_id')}")
+
+
+@setup.command("restore-site")
+@click.argument("site_id")
+@click.pass_context
+def setup_restore_site(ctx: click.Context, site_id: str):
+    """Restore a soft-deleted site for this brand."""
+    client = _require_client(ctx)
+    res = client.restore_site(site_id)
+    console.print(f"[green]Restored[/green] {res.get('site_id') or site_id}")
+
+
+@setup.command("wipe-sites")
+@click.option("--yes", is_flag=True, help="Confirm wipe of every site for this brand")
+@click.pass_context
+def setup_wipe_sites(ctx: click.Context, yes: bool):
+    """Delete every site for this brand."""
+    if not yes:
+        console.print("Pass --yes to delete every site for this brand.")
+        raise SystemExit(1)
+    client = _require_client(ctx)
+    res = client.delete_all_sites()
+    console.print(
+        f"[green]Wiped[/green] {res.get('count', 0)} sites for brand {res.get('brand_id')}"
+    )
+
+
+@setup.command("brand")
+@click.argument("brand_id", required=False, default="")
+@click.option("--webhook-url", default=None, help="Standing webhook URL for alerts")
+@click.option("--push-action", "push_actions", multiple=True, help="Actions that trigger webhook push (alert or suppress)")
+@click.pass_context
+def setup_brand(ctx: click.Context, brand_id: str, webhook_url: str | None, push_actions: tuple[str, ...]):
+    """Configure tenant brand preferences, delivery targets, and webhooks."""
+    client = _require_client(ctx)
+    target_brand = brand_id or client.brand_id
+    # Create or update client with target brand
+    if target_brand != client.brand_id:
+        client = NovinClient(api_url=client.api_url, api_key=client.api_key, brand_id=target_brand)
+    
+    console.print(f"[cyan]Configuring brand[/cyan] [bold]{target_brand}[/bold]...")
+    mapped = []
+    for action in push_actions:
+        mapped.append("alert" if str(action).lower() == "review" else action)
+    res: dict = {}
+    if webhook_url:
+        res = client.test_brand_webhook(webhook_url)
+    if mapped:
+        res = client.setup_brand(push_actions=mapped)
+    if not webhook_url and not mapped:
+        res = client.get_brand_setup()
+    console.print(f"[bold green]✓ Brand Configured:[/bold green] {target_brand}")
+    if res.get("webhook_url"):
+        console.print(f"  [dim]Webhook URL:[/dim] {res.get('webhook_url')}")
+    if res.get("push_actions"):
+        console.print(f"  [dim]Push Actions:[/dim] {', '.join(res.get('push_actions', []))}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# novin destinations
+# ─────────────────────────────────────────────────────────────────────────────
+
+@cli.group()
+def destinations():
+    """Where alerts go: Slack or an API, for the whole brand or one site."""
+    pass
+
+
+def _dest_rows(row: dict) -> list[dict]:
+    dests = row.get("destinations")
+    if isinstance(dests, list) and dests:
+        return [item for item in dests if isinstance(item, dict)]
+    url = str(row.get("webhook_url") or "").strip()
+    if url:
+        return [{"url": url, "kind": "api", "auth_attached": bool(row.get("webhook_verified"))}]
+    return []
+
+
+def _kind_name(kind: str | None) -> str:
+    key = str(kind or "json").strip().lower()
+    if key in {"json", "api"}:
+        return "JSON API"
+    if key == "slack":
+        return "Slack message"
+    if key == "slack_api":
+        return "Slack API"
+    if key == "teams":
+        return "Teams card"
+    if key == "discord":
+        return "Discord message"
+    return key or "JSON API"
+
+
+def _print_destinations(label: str, row: dict, *, covers: str) -> None:
+    dests = _dest_rows(row)
+    console.print(f"[bold]{label}[/bold]  [dim]{covers}[/dim]")
+    if not dests:
+        console.print("    [dim]no URLs[/dim]")
+        return
+    for item in dests:
+        kind = _kind_name(item.get("kind"))
+        if item.get("auth_attached"):
+            auth = "API key attached — sent on every alert"
+        elif str(item.get("kind") or "") in {"slack", "teams", "discord", "slack_api"}:
+            auth = "secret is in the URL"
+        else:
+            auth = "no key"
+        console.print(f"    [cyan]{kind}[/cyan]  {item.get('url')}")
+        console.print(f"      [dim]{auth}[/dim]")
+
+
+@destinations.command("list")
+@click.pass_context
+def destinations_list(ctx: click.Context):
+    """Show where alerts go for this brand and each site."""
+    client = _require_client(ctx)
+    brand = client.get_brand_setup()
+    console.print(f"[bold]Delivery[/bold]  brand [cyan]{client.brand_id}[/cyan]")
+    console.print(
+        "[dim]When Novin alerts, it POSTs the verdict to every URL below, at the same time.\n"
+        "Brand URLs run for every site. A site's URLs run only for that site, plus brand.[/dim]"
+    )
+    console.print()
+    _print_destinations("brand", brand, covers="alerts from every site")
+    push = brand.get("push_actions") or []
+    if "suppress" in push:
+        console.print("  [dim]when:[/dim] alerts and all-clears")
+    else:
+        console.print("  [dim]when:[/dim] alerts only — quiet scenes stay in Incidents")
+    sites = client.list_sites()
+    if not sites:
+        console.print()
+        console.print("[dim]No sites yet. Add one, then you can give it its own URLs.[/dim]")
+        return
+    console.print()
+    for row in sites:
+        sid = str(row.get("site_id") or "")
+        name = str(row.get("site_name") or sid)
+        label = sid if name == sid else f"{name} ({sid})"
+        _print_destinations(label, row, covers="this site only, plus brand")
+
+
+@destinations.command("add")
+@click.option("--url", "webhook_url", required=True, help="Slack incoming webhook, or any HTTPS API that should receive the verdict")
+@click.option("--site", "site_id", default="", help="Site id. Omit to send alerts from every site (brand).")
+@click.option("--key", "api_key", default="", help="If this is a private API, the key Novin sends on every alert. Slack webhooks do not need this.")
+@click.option("--header", "auth_header", default="", help="How to send the key: Authorization (default) or X-API-Key")
+@click.option("--kind", default="auto", help="auto (from URL), slack, or api (JSON verdict)")
+@click.pass_context
+def destinations_add(
+    ctx: click.Context,
+    webhook_url: str,
+    site_id: str,
+    api_key: str,
+    auth_header: str,
+    kind: str,
+):
+    """Add a URL that receives alerts. Slack is detected from the URL. APIs can carry a key."""
+    client = _require_client(ctx)
+    res = client.add_destination(
+        webhook_url,
+        site_id=site_id or None,
+        kind=None if kind in {"", "auto"} else kind,
+        api_key=api_key or None,
+        auth_header=auth_header or None,
+    )
+    scope = f"site {site_id} only (brand URLs still fire)" if site_id else "every site"
+    console.print(f"[green]This URL now receives alerts for {scope}.[/green]")
+    dests = res.get("destinations") or []
+    for item in dests:
+        console.print(f"  {_kind_name(item.get('kind'))}  {item.get('url')}")
+
+
+@destinations.command("set")
+@click.option("--url", "webhook_url", required=True, help="Slack webhook or HTTPS API URL")
+@click.option("--site", "site_id", default="", help="Site id. Omit for the brand default.")
+@click.option("--key", "api_key", default="", help="API key sent on every push")
+@click.pass_context
+def destinations_set(ctx: click.Context, webhook_url: str, site_id: str, api_key: str):
+    """Add a URL that receives alerts (same as destinations add)."""
+    client = _require_client(ctx)
+    client.add_destination(
+        webhook_url,
+        site_id=site_id or None,
+        api_key=api_key or None,
+    )
+    scope = f"site {site_id} only (brand URLs still fire)" if site_id else "every site"
+    console.print(f"[green]This URL now receives alerts for {scope}.[/green]")
+
+
+@destinations.command("clear")
+@click.option("--site", "site_id", default="", help="Site id. Omit to clear the brand default.")
+@click.option("--url", "webhook_url", default="", help="Remove one URL. Omit to remove all for this scope.")
+@click.pass_context
+def destinations_clear(ctx: click.Context, site_id: str, webhook_url: str):
+    """Stop sending alerts to one URL, or to every URL for the brand or a site."""
+    client = _require_client(ctx)
+    if webhook_url:
+        client.remove_destination(webhook_url, site_id=site_id or None)
+        console.print("[green]That URL will no longer receive alerts.[/green]")
+        return
+    if site_id:
+        client.clear_site_webhook(site_id)
+        console.print(
+            f"[green]Cleared[/green] extra URLs for site [bold]{site_id}[/bold]. "
+            "Brand URLs still fire."
+        )
+        return
+    client.clear_brand_webhook()
+    console.print(
+        f"[green]Cleared[/green] brand URLs for [bold]{client.brand_id}[/bold]. "
+        "Sites can still have their own."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# novin ingest
+# ─────────────────────────────────────────────────────────────────────────────
+
+@cli.group()
+def ingest():
+    """Media ingestion and AI inference commands."""
+    pass
+
+
+@ingest.command("image")
+@click.argument("image_path", type=click.Path(exists=True))
+@click.option("--site-id", default="", help="Site identifier (defaults to active site)")
+@click.option("--camera-id", default="cam_01", help="Camera identifier")
+@click.option("--zone", default=None, help="Camera zone for this event (omit to keep the stored site)")
+@click.option("--site-type", default=None, help="Override site type for this event (omit to keep the stored site)")
+@click.option("--after-hours", is_flag=True, help="Flag after-hours lighting/period")
+@click.option("--low-light", is_flag=True, help="Flag low-light / night conditions")
+@click.option("--beta", is_flag=True, default=False, help="Enable Beta Context & Feedback Intelligence Reasoning")
+@click.option("--format", "out_format", type=click.Choice(["card", "json"]), default="card")
+@click.pass_context
+def ingest_image(ctx: click.Context, image_path: str, site_id: str, camera_id: str, zone: str, site_type: str, after_hours: bool, low_light: bool, beta: bool, out_format: str):
+    """Synchronously ingest a single image and display the AI verdict."""
+    client = _require_client(ctx)
+    active_cfg = client._get_active_site_config()
+    target_site_id = site_id or active_cfg.get("active_site_id") or "site_office_main"
+
+    console.print(f"[dim]Ingesting {Path(image_path).name} to {target_site_id}/{camera_id} {'[cyan](BETA REASONING ACTIVE)[/cyan]' if beta else ''}...[/dim]")
+    try:
+        verdict, wall_ms = client.ingest_image(
+            image_path_or_b64=Path(image_path),
+            site_id=target_site_id,
+            camera_id=camera_id,
+            zone=zone,
+            site_type=site_type,
+            after_hours=after_hours,
+            low_light=low_light,
+            beta=beta,
+        )
+        if out_format == "json":
+            console.print(json.dumps(verdict, indent=2))
+        else:
+            render_verdict_card(verdict, wall_time_ms=wall_ms)
+    except Exception as exc:
+        console.print(f"[bold red]Ingestion failed:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@ingest.command("burst")
+@click.argument("image_paths", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("--site-id", default="", help="Site identifier (defaults to active site)")
+@click.option("--camera-id", default="cam_perimeter_02", help="Camera identifier")
+@click.option("--zone", default=None, help="Camera zone for this event")
+@click.option("--site-type", default=None, help="Override site type for this event")
+@click.option("--format", "out_format", type=click.Choice(["card", "json"]), default="card")
+@click.pass_context
+def ingest_burst(ctx: click.Context, image_paths: tuple[str, ...], site_id: str, camera_id: str, zone: str | None, site_type: str | None, out_format: str):
+    """Submit a multi-frame burst and execute zero-delay long-polling."""
+    client = _require_client(ctx)
+    active_cfg = client._get_active_site_config()
+    target_site_id = site_id or active_cfg.get("active_site_id") or "site_warehouse_south"
+    console.print(f"[dim]Submitting {len(image_paths)} frames for burst joint analysis...[/dim]")
+    try:
+        verdict, submit_ms, total_ms = client.ingest_burst_and_poll(
+            image_paths=list(image_paths),
+            site_id=target_site_id,
+            camera_id=camera_id,
+            zone=zone,
+            site_type=site_type,
+        )
+        console.print(f"[dim]Submit Ack: {submit_ms}ms  ·  Total Polling TTC: {total_ms}ms[/dim]")
+        if out_format == "json":
+            console.print(json.dumps(verdict, indent=2))
+        else:
+            render_verdict_card(verdict, wall_time_ms=total_ms)
+    except Exception as exc:
+        console.print(f"[bold red]Burst ingestion failed:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@ingest.command("video")
+@click.argument("video_path", type=click.Path(exists=True))
+@click.option("--site-id", default="", help="Site identifier (defaults to active site)")
+@click.option("--camera-id", default="cam_perimeter_02", help="Camera identifier")
+@click.option("--zone", default=None, help="Camera zone for this event")
+@click.option("--site-type", default=None, help="Override site type for this event")
+@click.option("--format", "out_format", type=click.Choice(["card", "json"]), default="card")
+@click.pass_context
+def ingest_video(ctx: click.Context, video_path: str, site_id: str, camera_id: str, zone: str | None, site_type: str | None, out_format: str):
+    """Submit a video clip and execute zero-delay long-polling."""
+    client = _require_client(ctx)
+    active_cfg = client._get_active_site_config()
+    target_site_id = site_id or active_cfg.get("active_site_id") or "site_warehouse_south"
+    console.print(f"[dim]Submitting video {Path(video_path).name} for keyframe sampling...[/dim]")
+    try:
+        verdict, submit_ms, total_ms = client.ingest_video_and_poll(
+            video_path=Path(video_path),
+            site_id=target_site_id,
+            camera_id=camera_id,
+            zone=zone,
+            site_type=site_type,
+        )
+        console.print(f"[dim]Submit Ack: {submit_ms}ms  ·  Total Polling TTC: {total_ms}ms[/dim]")
+        if out_format == "json":
+            console.print(json.dumps(verdict, indent=2))
+        else:
+            render_verdict_card(verdict, wall_time_ms=total_ms)
+    except Exception as exc:
+        console.print(f"[bold red]Video ingestion failed:[/bold red] {exc}")
+        sys.exit(1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# novin incidents
+# ─────────────────────────────────────────────────────────────────────────────
+
+@cli.group()
+def incidents():
+    """Historical incident query and audit inspection."""
+    pass
+
+
+@incidents.command("list")
+@click.option("--limit", default=10, help="Number of incidents to return")
+@click.pass_context
+def incidents_list(ctx: click.Context, limit: int):
+    """Query recent historical incidents for the brand."""
+    client = _require_client(ctx)
+    res = client.list_incidents(limit=limit)
+    items = res.get("incidents") or res.get("events") or []
+
+    table = Table(title=f"Recent Incidents (Brand: {client.brand_id})", border_style="cyan")
+    table.add_column("Incident ID", style="bold")
+    table.add_column("Action")
+    table.add_column("Threat Level")
+    table.add_column("Site / Camera")
+    table.add_column("Summary", style="dim")
+
+    for it in items:
+        action = it.get("action") or it.get("response", {}).get("action") or "?"
+        threat = it.get("threat_level") or it.get("response", {}).get("threat_level") or "none"
+        style = "green" if action == "suppress" else "red"
+
+        table.add_row(
+            it.get("incident_id") or it.get("job_id", "")[:12],
+            f"[{style}]{action.upper()}[/{style}]",
+            threat.upper(),
+            f"{it.get('site_id', '')} / {it.get('stream_id', '')}",
+            (it.get("summary") or "")[:50],
+        )
+
+    console.print(table)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# novin feedback
+# ─────────────────────────────────────────────────────────────────────────────
+
+@cli.group()
+def feedback():
+    """Operator learning and verdict correction."""
+    pass
+
+
+@feedback.command("submit")
+@click.argument("incident_id")
+@click.argument("notes")
+@click.option("--action", "suggested_action", type=click.Choice(["alert", "suppress"]), default="suppress")
+@click.pass_context
+def feedback_submit(ctx: click.Context, incident_id: str, notes: str, suggested_action: str):
+    """Submit natural-language operator feedback on an incident."""
+    client = _require_client(ctx)
+    console.print(f"[cyan]Submitting feedback for incident[/cyan] [bold]{incident_id}[/bold]...")
+    res = client.submit_feedback(
+        incident_or_job_id=incident_id,
+        text=notes,
+        suggested_action=suggested_action,
+    )
+    console.print(f"[bold green]✓ Feedback Acknowledged:[/bold green] {res.get('message')}")
+    console.print(f"[dim]Tracking ID: {res.get('tracking_id')}[/dim]")
+
+
+def main() -> None:
+    cli(prog_name="novin")
+
+
+if __name__ == "__main__":
+    main()
