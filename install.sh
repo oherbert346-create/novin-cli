@@ -7,7 +7,6 @@ REPO="${NOVIN_CLI_REPO:-oherbert346-create/novin-cli}"
 BRANCH="${NOVIN_CLI_BRANCH:-main}"
 NOVIN_HOME="${NOVIN_HOME:-$HOME/.novin}"
 BIN_DIR="${NOVIN_BIN:-$HOME/.local/bin}"
-API_URL="${NOVIN_API_URL:-https://novin-api.fly.dev}"
 
 echo
 echo "Novin CLI"
@@ -56,7 +55,6 @@ fi
 cat > "$BIN_DIR/novin" <<EOF
 #!/bin/sh
 # Local Novin terminal. Does not start a server.
-export NOVIN_API_URL="\${NOVIN_API_URL:-${API_URL}}"
 exec "${VENV}/bin/novin" "\$@"
 EOF
 chmod +x "$BIN_DIR/novin"

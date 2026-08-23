@@ -14,7 +14,6 @@ from novin import __version__
 
 CLI_REPO = os.environ.get("NOVIN_CLI_REPO", "oherbert346-create/novin-cli")
 CLI_BRANCH = os.environ.get("NOVIN_CLI_BRANCH", "main")
-DEFAULT_API_URL = "https://novin-api.fly.dev"
 
 
 def novin_home() -> Path:
@@ -67,11 +66,9 @@ def _download_latest(dest: Path) -> Path:
 def _write_wrapper(python_bin: Path) -> bool:
     """Write ~/.local/bin/novin when missing, or when it already launches the local venv."""
     path = wrapper_path()
-    api = os.environ.get("NOVIN_API_URL") or DEFAULT_API_URL
     body = (
         "#!/bin/sh\n"
         "# Local Novin terminal. Does not start a server.\n"
-        f'export NOVIN_API_URL="${{NOVIN_API_URL:-{api}}}"\n'
         f'exec "{python_bin.parent / "novin"}" "$@"\n'
     )
     if path.is_file():

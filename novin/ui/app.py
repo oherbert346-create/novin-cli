@@ -26,10 +26,6 @@ from novin.client import session as cli_session
 from novin.ui.labels import DELIVERY_INTRO, DELIVERY_KIND_LABELS, ENVIRONMENT_LABELS, SITE_TYPES
 
 
-def _host(client: NovinClient) -> str:
-    return client.api_url.replace("https://", "").replace("http://", "")
-
-
 def _active_site_id() -> str:
     cfg = cli_session.load_config()
     return str(cfg.get("active_site_id") or next(iter(cfg.get("sites") or {}), "") or "")
@@ -100,7 +96,6 @@ def _dest_summary(row: dict[str, Any], *, is_brand: bool = False) -> str:
 class HomePane(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(id="home-banner")
-        yield Static(id="home-status")
         yield Static(
             "[dim]This brand's sites. Highlight a row and press Enter, or click it, to edit.[/dim]",
             id="home-hint",
@@ -119,9 +114,8 @@ class HomePane(Vertical):
         app = self.app
         assert isinstance(app, NovinApp)
         self.query_one("#home-banner", Static).update(
-            f"[b]Novin[/b]  ·  brand [cyan]{app.novin.brand_id}[/cyan]  ·  {_host(app.novin)}"
+            f"[b]Novin[/b]  ·  brand [cyan]{app.novin.brand_id}[/cyan]"
         )
-        app.refresh_status()
         app.load_sites()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -325,7 +319,6 @@ class NovinApp(App[None]):
     Header { background: #1c1916; }
     Footer { background: #1c1916; }
     #home-banner { padding: 1 1 0 1; }
-    #home-status { padding: 1; color: #b7b0a6; }
     #home-hint { padding: 0 1 1 1; color: #8a837a; height: auto; }
     #home-actions, #inc-actions, #site-actions, #brand-actions, #site-dest-actions {
         padding: 1;
@@ -361,7 +354,7 @@ class NovinApp(App[None]):
         self.brand_setup: dict[str, Any] = {}
         self.delivery_site_id = BRAND_SCOPE
         self.delivery_url = ""
-        self.sub_title = f"brand {client.brand_id}  ·  {_host(client)}"
+        self.sub_title = f"brand {client.brand_id}"
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -377,7 +370,6 @@ class NovinApp(App[None]):
         yield Footer()
 
     def action_refresh(self) -> None:
-        self.refresh_status()
         self.load_sites()
         self.load_delivery()
         self.load_incidents()
@@ -386,23 +378,6 @@ class NovinApp(App[None]):
         cli_session.clear_session()
         self.notify("Signed out. Run novin and paste your API key.")
         self.exit()
-
-    @work(thread=True, exclusive=True, group="status")
-    def refresh_status(self) -> None:
-        try:
-            res = self.novin.ping()
-            health = (res.get("health") or {}).get("status", "?")
-            ready = (res.get("ready") or {}).get("status", "?")
-            text = f"API  health={health}  ready={ready}"
-        except Exception as exc:
-            text = f"[red]API unreachable[/red]  {exc}"
-        self.call_from_thread(self._set_status, text)
-
-    def _set_status(self, text: str) -> None:
-        try:
-            self.query_one("#home-status", Static).update(text)
-        except Exception:
-            return
 
     def start_new_site(self) -> None:
         self.apply_site_to_form({})

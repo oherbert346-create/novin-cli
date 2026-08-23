@@ -221,23 +221,17 @@ def setup():
 @setup.command("check")
 @click.pass_context
 def setup_check(ctx: click.Context):
-    """Check connectivity and readiness of the Novin API cluster."""
+    """Check Novin can be reached from this machine."""
     client = _require_client(ctx)
-    console.print(f"[cyan]Probing Novin cluster at[/cyan] [bold]{client.api_url}[/bold]...")
-    res = client.ping()
-
-    table = Table(title="Novin API Connectivity & Readiness", border_style="cyan")
-    table.add_column("Probe", style="bold")
-    table.add_column("Status")
-    table.add_column("Latency (ms)", justify="right")
-
-    health_status = "[green]ONLINE (200)[/green]" if res["health"].get("status") == "ok" else f"[red]ERROR ({res['health']})[/red]"
-    ready_status = "[green]READY (200)[/green]" if res["ready"].get("status") == "ready" else f"[yellow]{res['ready']}[/yellow]"
-
-    table.add_row("Health Probe (/health)", health_status, str(res["health_ms"]))
-    table.add_row("Readiness Probe (/ready)", ready_status, str(res["ready_ms"]))
-    table.add_row("Auth Scope", f"Brand: [bold]{client.brand_id}[/bold]", "-")
-    console.print(table)
+    try:
+        res = client.ping()
+        ok = (res.get("health") or {}).get("status") == "ok" and (res.get("ready") or {}).get("status") == "ready"
+    except Exception:
+        ok = False
+    if ok:
+        console.print(f"[green]Novin is reachable.[/green]  brand [bold]{client.brand_id}[/bold]")
+    else:
+        console.print("[red]Could not reach Novin from this machine.[/red]")
 
 
 @setup.command("site")
