@@ -10,8 +10,10 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from novin import __version__
 from novin.client.api_client import NovinClient
 from novin.client import session as cli_session
+from novin.install import update_local_install
 from novin.ui.labels import ENV_HELP as _ENV_HELP
 from novin.ui.verdict_card import render_verdict_card
 
@@ -142,6 +144,7 @@ class _NovinGroup(click.Group):
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
+@click.version_option(__version__, prog_name="novin")
 @click.option("--api-url", default=None, help="Novin API URL")
 @click.option("--api-key", default=None, help="Key (skips the login prompt)")
 @click.option("--brand-id", default=None, help="Brand id")
@@ -187,6 +190,22 @@ def logout_cmd():
         )
     else:
         console.print("[green]Signed out.[/green] Run [bold]novin[/bold] and paste your master key.")
+
+
+@cli.command("update")
+def update_cmd():
+    """Install the latest terminal on this machine. Does not run unless you ask."""
+    console.print("Updating the local Novin terminal...")
+    try:
+        result = update_local_install()
+    except Exception as exc:
+        console.print(f"[red]Could not update:[/red] {exc}")
+        raise SystemExit(1) from exc
+    console.print("[green]This machine now has the latest terminal.[/green]")
+    console.print(f"  version {result['version']}")
+    if not result["wrapper_written"]:
+        console.print("[dim]Your existing novin command was left as-is.[/dim]")
+    console.print("Run [bold]novin[/bold].")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

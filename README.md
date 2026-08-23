@@ -27,6 +27,16 @@ novin
 - First time: paste the **master key** Novin gave you.
 - After that: paste the **API key** for your brand.
 
+A new install always gets the current terminal. If you already have it, it stays as-is until you update.
+
+## Update
+
+```bash
+novin update
+```
+
+API changes on Novin do not require this. Use it when we ship a new terminal.
+
 ## What this is
 
 The terminal lets you manage **sites**, **delivery** (where alerts go), and **incidents**. It talks to the Novin API over HTTPS. Vision and storage stay on Novin.
