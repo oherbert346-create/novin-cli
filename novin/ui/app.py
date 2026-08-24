@@ -82,8 +82,6 @@ def _dest_auth_label(item: dict[str, Any]) -> str:
     kind = str(item.get("kind") or "")
     if item.get("auth_attached") or item.get("api_key"):
         return "API key"
-    if kind in {"slack", "teams", "discord", "slack_api"}:
-        return "in URL"
     return "—"
 
 
@@ -204,10 +202,10 @@ class DeliveryPane(VerticalScroll):
         yield Input(
             "",
             id="dest-url",
-            placeholder="https://hooks.slack.com/…  or  https://your-api/events",
+            placeholder="https://your-api.example/events",
         )
-        yield Label("API key (optional — only if the URL needs one)")
-        yield Input("", id="dest-key", password=True, placeholder="leave blank for Slack")
+        yield Label("API key (optional — only if that API needs one)")
+        yield Input("", id="dest-key", password=True, placeholder="optional")
         yield Horizontal(
             Button("Add URL", id="add-dest", variant="primary"),
             Button("Remove", id="remove-dest", variant="error"),
@@ -250,25 +248,6 @@ class DeliveryPane(VerticalScroll):
                 pass
 
 
-class IncidentsPane(Vertical):
-    def compose(self) -> ComposeResult:
-        yield Horizontal(Button("Refresh", id="refresh-incidents", variant="primary"), id="inc-actions")
-        table = DataTable(id="incidents-table")
-        table.add_columns("Incident", "Action", "Summary")
-        yield table
-
-    def on_mount(self) -> None:
-        app = self.app
-        assert isinstance(app, NovinApp)
-        app.load_incidents()
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "refresh-incidents":
-            app = self.app
-            assert isinstance(app, NovinApp)
-            app.load_incidents()
-
-
 class NovinApp(App[None]):
     """Full-screen terminal UI. Nothing is served in a browser."""
 
@@ -282,7 +261,7 @@ class NovinApp(App[None]):
     Footer { background: #1c1916; }
     #home-banner { padding: 1 1 0 1; }
     #home-hint { padding: 0 1 1 1; color: #8a837a; height: auto; }
-    #home-actions, #inc-actions, #site-actions, #site-dest-actions {
+    #home-actions, #site-actions, #site-dest-actions {
         padding: 1;
         height: auto;
     }
@@ -326,14 +305,11 @@ class NovinApp(App[None]):
                 yield SitePane()
             with TabPane("Delivery", id="delivery"):
                 yield DeliveryPane()
-            with TabPane("Incidents", id="incidents"):
-                yield IncidentsPane()
         yield Footer()
 
     def action_refresh(self) -> None:
         self.load_sites()
         self.load_delivery()
-        self.load_incidents()
 
     def action_logout(self) -> None:
         cli_session.clear_session()
@@ -620,7 +596,7 @@ class NovinApp(App[None]):
             return
         key = self.query_one("#dest-key", Input).value.strip()
         site_id = None if self.delivery_site_id == BRAND_SCOPE else self.delivery_site_id
-        self._add_dest_work(url, site_id, "auto", key)
+        self._add_dest_work(url, site_id, "json", key)
 
     def start_remove_destination(self) -> None:
         url = self.delivery_url.strip() or self.query_one("#dest-url", Input).value.strip()
@@ -636,8 +612,9 @@ class NovinApp(App[None]):
             self.novin.add_destination(
                 url,
                 site_id=site_id,
-                kind=None if kind == "auto" else kind,
+                kind="json",
                 api_key=api_key or None,
+                auth_header="X-API-Key" if api_key else None,
             )
             scope = "every site" if site_id is None else f"site {site_id}"
             msg = f"[green]This URL now receives alerts for {scope}.[/green]"
@@ -670,30 +647,6 @@ class NovinApp(App[None]):
             self.query_one("#site-dest-result", Static).update(text)
         except Exception:
             return
-
-    @work(thread=True, exclusive=True, group="incidents")
-    def load_incidents(self) -> None:
-        try:
-            res = self.novin.list_incidents(limit=20)
-            items = res.get("incidents") or res.get("events") or []
-        except Exception as exc:
-            items = [{"incident_id": "error", "action": "?", "summary": str(exc)}]
-        self.call_from_thread(self._fill_incidents, items)
-
-    def _fill_incidents(self, items: list[dict[str, Any]]) -> None:
-        try:
-            table = self.query_one("#incidents-table", DataTable)
-        except Exception:
-            return
-        table.clear()
-        for it in items:
-            action = it.get("action") or (it.get("response") or {}).get("action") or "?"
-            table.add_row(
-                str(it.get("incident_id") or it.get("job_id") or "")[:18],
-                str(action).upper(),
-                (it.get("summary") or (it.get("response") or {}).get("summary") or "")[:70],
-            )
-
 
 def run_tui(client: NovinClient) -> None:
     NovinApp(client).run()

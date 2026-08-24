@@ -40,5 +40,5 @@ DELIVERY_KIND_LABELS = {
 
 DELIVERY_INTRO = (
     "[b]Brand[/b] is one URL for every site. Click a site to set URLs for that site only.\n"
-    "[dim]Paste a Slack webhook, or any HTTPS API. Add a key only if that API needs one.[/dim]"
+    "[dim]Paste an HTTPS API. Add a key only if that API needs one.[/dim]"
 )
