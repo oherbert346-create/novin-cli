@@ -91,7 +91,21 @@ def update_local_install() -> dict[str, str | bool]:
     subprocess.run([str(python_bin), "-m", "pip", "install", "-q", "--upgrade", "pip"], check=True)
     with tempfile.TemporaryDirectory() as raw:
         src = _download_latest(Path(raw))
-        subprocess.run([str(python_bin), "-m", "pip", "install", "-q", str(src)], check=True)
+        # Same public version (1.0.0) can still ship new terminal files.
+        subprocess.run(
+            [
+                str(python_bin),
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "--upgrade",
+                "--force-reinstall",
+                "--no-cache-dir",
+                str(src),
+            ],
+            check=True,
+        )
     wrote = _write_wrapper(python_bin)
     return {
         "version": current_version(),

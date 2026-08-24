@@ -20,6 +20,13 @@ from novin.ui.verdict_card import render_verdict_card
 console = Console()
 
 
+def _emit_verdict(verdict: dict, *, out_format: str, wall_ms: float | None = None) -> None:
+    if out_format == "json":
+        sys.stdout.write(json.dumps(verdict) + "\n")
+        return
+    render_verdict_card(verdict, wall_time_ms=wall_ms)
+
+
 def _env_api_key() -> str:
     return (os.environ.get("NOVIN_API_KEY") or "").strip()
 
@@ -281,40 +288,22 @@ def setup_check(ctx: click.Context):
 @setup.command("site")
 @click.argument("site_id")
 @click.option("--name", default="", help="Human-readable site name")
-@click.option("--type", "site_type", default="office_retail", help="Guesses environment if --environment is omitted (office, warehouse, industrial, retail, school, transit)")
-@click.option("--hours", default="", help="Expected operating hours (optional; omit if none)")
-@click.option("--timezone", default="", help="IANA timezone for local clock (empty = UTC)")
-@click.option("--zone", "zones", multiple=True, help="Restricted zones (e.g. --zone server_room --zone perimeter)")
-@click.option("--asset", "assets", multiple=True, help="Critical assets (e.g. --asset main_breaker)")
-@click.option("--benign-pattern", "benign_patterns", multiple=True, help="Known benign activity (e.g. --benign-pattern 'night cleaning crew')")
-@click.option("--note", "notes", multiple=True, help="Temporary notes (e.g. --note 'HVAC repair crew expected on roof')")
-@click.option("--policy", "policies", multiple=True, help="Standing alert instruction (e.g. --policy 'missing hard hats in work zones')")
+@click.option("--hours", default=None, help="Expected operating hours (optional; omit if none)")
+@click.option("--camera", "cameras", multiple=True, help="Camera id this site owns (repeatable)")
 @click.option("--environment", default="", help=_ENV_HELP)
 @click.option("--brief", "--context", "brief", default="", help="Natural-language site context. What is normal here and what to watch for.")
-@click.option("--focus", default="", help="Legacy security-job id. Prefer --brief.")
-@click.option("--secondary", "secondaries", multiple=True, help="Legacy secondary focus (max 2). Prefer --brief.")
-@click.option("--depth", "output_depth", default="compact", help="compact or operator")
 @click.pass_context
-def setup_site(ctx: click.Context, site_id: str, name: str, site_type: str, hours: str, timezone: str, zones: tuple[str, ...], assets: tuple[str, ...], benign_patterns: tuple[str, ...], notes: tuple[str, ...], policies: tuple[str, ...], environment: str, brief: str, focus: str, secondaries: tuple[str, ...], output_depth: str):
-    """Provision a digital site with operational DNA context."""
+def setup_site(ctx: click.Context, site_id: str, name: str, hours: str | None, cameras: tuple[str, ...], environment: str, brief: str):
+    """Create or update a site (same fields as the terminal: id, name, world, hours, cameras, context)."""
     client = _require_client(ctx)
     console.print(f"[cyan]Provisioning site[/cyan] [bold]{site_id}[/bold]...")
     res = client.setup_site(
         site_id=site_id,
         site_name=name or site_id,
-        site_type=site_type,
-        expected_hours=hours or None,
-        timezone=timezone or None,
-        restricted_zones=list(zones),
-        critical_assets=list(assets),
-        known_benign_patterns=list(benign_patterns),
-        temporary_notes=list(notes),
-        policies=list(policies),
+        expected_hours=hours,
         environment=environment or None,
         brief=brief or None,
-        focus=focus or None,
-        secondary_focuses=list(secondaries),
-        output_depth=output_depth or "compact",
+        cameras=list(cameras) if cameras else None,
     )
     console.print(f"[bold green]✓ Site Registered:[/bold green] {res.get('site_id')} (Brand: {res.get('brand_id')})")
     if res.get("message"):
@@ -448,8 +437,8 @@ def destinations_list(ctx: click.Context):
     brand = client.get_brand_setup()
     console.print(f"[bold]Delivery[/bold]  brand [cyan]{client.brand_id}[/cyan]")
     console.print(
-        "[dim]When Novin alerts, it POSTs the verdict to every URL below, at the same time.\n"
-        "Brand URLs run for every site. A site's URLs run only for that site, plus brand.[/dim]"
+        "[dim]When Novin alerts, it POSTs to matching URLs.\n"
+        "Brand URLs run for every site. A site's URLs run only for that site — never another site.[/dim]"
     )
     console.print()
     _print_destinations("brand", brand, covers="alerts from every site")
@@ -468,7 +457,7 @@ def destinations_list(ctx: click.Context):
         sid = str(row.get("site_id") or "")
         name = str(row.get("site_name") or sid)
         label = sid if name == sid else f"{name} ({sid})"
-        _print_destinations(label, row, covers="this site only, plus brand")
+        _print_destinations(label, row, covers="this site only")
 
 
 @destinations.command("add")
@@ -495,7 +484,7 @@ def destinations_add(
         api_key=api_key or None,
         auth_header=auth_header or None,
     )
-    scope = f"site {site_id} only (brand URLs still fire)" if site_id else "every site"
+    scope = f"site {site_id} only" if site_id else "every site"
     console.print(f"[green]This URL now receives alerts for {scope}.[/green]")
     dests = res.get("destinations") or []
     for item in dests:
@@ -515,7 +504,7 @@ def destinations_set(ctx: click.Context, webhook_url: str, site_id: str, api_key
         site_id=site_id or None,
         api_key=api_key or None,
     )
-    scope = f"site {site_id} only (brand URLs still fire)" if site_id else "every site"
+    scope = f"site {site_id} only" if site_id else "every site"
     console.print(f"[green]This URL now receives alerts for {scope}.[/green]")
 
 
@@ -572,104 +561,86 @@ def _site_and_camera(client: NovinClient, site_id: str, camera_id: str) -> tuple
             cams = [str(item).strip() for item in raw if str(item).strip()]
         else:
             cams = [part.strip() for part in str(raw).split(",") if part.strip()]
-    cam = (camera_id or "").strip() or (cams[0] if cams else "cam_01")
+    cam = (camera_id or "").strip() or (cams[0] if cams else "")
+    if not cam:
+        console.print("[red]Add cameras on the site, or pass --camera-id.[/red]")
+        raise SystemExit(1)
     return sid, cam
 
 
 @ingest.command("image")
-@click.argument("image_path", type=click.Path(exists=True))
+@click.argument("image_path", type=str)
 @click.option("--site-id", default="", help="Site. Defaults to the one on this machine.")
 @click.option("--camera-id", default="", help="Camera. Defaults to the site's first camera.")
-@click.option("--zone", default=None, help="Camera zone for this event (omit to keep the stored site)")
-@click.option("--site-type", default=None, help="Override site type for this event (omit to keep the stored site)")
-@click.option("--after-hours", is_flag=True, help="Flag after-hours lighting/period")
-@click.option("--low-light", is_flag=True, help="Flag low-light / night conditions")
-@click.option("--beta", is_flag=True, default=False, help="Enable Beta Context & Feedback Intelligence Reasoning")
 @click.option("--format", "out_format", type=click.Choice(["card", "json"]), default="card")
 @click.pass_context
-def ingest_image(ctx: click.Context, image_path: str, site_id: str, camera_id: str, zone: str, site_type: str, after_hours: bool, low_light: bool, beta: bool, out_format: str):
-    """Synchronously ingest a single image and display the AI verdict."""
+def ingest_image(ctx: click.Context, image_path: str, site_id: str, camera_id: str, out_format: str):
+    """Ingest one image (file path or URL) and show the verdict."""
     client = _require_client(ctx)
     target_site_id, camera_id = _site_and_camera(client, site_id, camera_id)
-
-    console.print(f"[dim]Sending {Path(image_path).name} from {target_site_id}/{camera_id}...[/dim]")
+    name_label = image_path if image_path.startswith(("http://", "https://")) else Path(image_path).name
+    if out_format != "json":
+        console.print(f"[dim]Sending {name_label} from {target_site_id}/{camera_id}...[/dim]")
     try:
         verdict, wall_ms = client.ingest_image(
-            image_path_or_b64=Path(image_path),
+            image_path_or_b64=image_path,
             site_id=target_site_id,
             camera_id=camera_id,
-            zone=zone,
-            site_type=site_type,
-            after_hours=after_hours,
-            low_light=low_light,
-            beta=beta,
         )
-        if out_format == "json":
-            console.print(json.dumps(verdict, indent=2))
-        else:
-            render_verdict_card(verdict, wall_time_ms=wall_ms)
+        _emit_verdict(verdict, out_format=out_format, wall_ms=wall_ms)
     except Exception as exc:
         console.print(f"[bold red]Ingestion failed:[/bold red] {exc}")
         sys.exit(1)
 
 
 @ingest.command("burst")
-@click.argument("image_paths", nargs=-1, required=True, type=click.Path(exists=True))
+@click.argument("image_paths", nargs=-1, required=True, type=str)
 @click.option("--site-id", default="", help="Site identifier (defaults to active site)")
 @click.option("--camera-id", default="", help="Camera. Defaults to the site's first camera.")
-@click.option("--zone", default=None, help="Camera zone for this event")
-@click.option("--site-type", default=None, help="Override site type for this event")
 @click.option("--format", "out_format", type=click.Choice(["card", "json"]), default="card")
 @click.pass_context
-def ingest_burst(ctx: click.Context, image_paths: tuple[str, ...], site_id: str, camera_id: str, zone: str | None, site_type: str | None, out_format: str):
-    """Submit a multi-frame burst and execute zero-delay long-polling."""
+def ingest_burst(ctx: click.Context, image_paths: tuple[str, ...], site_id: str, camera_id: str, out_format: str):
+    """Submit a multi-frame burst (files or URLs) and poll until the verdict."""
     client = _require_client(ctx)
     target_site_id, camera_id = _site_and_camera(client, site_id, camera_id)
-    console.print(f"[dim]Sending {len(image_paths)} frames from {target_site_id}/{camera_id}...[/dim]")
+    if out_format != "json":
+        console.print(f"[dim]Sending {len(image_paths)} frames from {target_site_id}/{camera_id}...[/dim]")
     try:
         verdict, submit_ms, total_ms = client.ingest_burst_and_poll(
             image_paths=list(image_paths),
             site_id=target_site_id,
             camera_id=camera_id,
-            zone=zone,
-            site_type=site_type,
         )
-        console.print(f"[dim]Submit Ack: {submit_ms}ms  ·  Total Polling TTC: {total_ms}ms[/dim]")
-        if out_format == "json":
-            console.print(json.dumps(verdict, indent=2))
-        else:
-            render_verdict_card(verdict, wall_time_ms=total_ms)
+        if out_format != "json":
+            console.print(f"[dim]Submit Ack: {submit_ms}ms  ·  Total Polling TTC: {total_ms}ms[/dim]")
+        _emit_verdict(verdict, out_format=out_format, wall_ms=total_ms)
     except Exception as exc:
         console.print(f"[bold red]Burst ingestion failed:[/bold red] {exc}")
         sys.exit(1)
 
 
 @ingest.command("video")
-@click.argument("video_path", type=click.Path(exists=True))
+@click.argument("video_path", type=str)
 @click.option("--site-id", default="", help="Site identifier (defaults to active site)")
 @click.option("--camera-id", default="", help="Camera. Defaults to the site's first camera.")
-@click.option("--zone", default=None, help="Camera zone for this event")
-@click.option("--site-type", default=None, help="Override site type for this event")
 @click.option("--format", "out_format", type=click.Choice(["card", "json"]), default="card")
 @click.pass_context
-def ingest_video(ctx: click.Context, video_path: str, site_id: str, camera_id: str, zone: str | None, site_type: str | None, out_format: str):
-    """Submit a video clip and execute zero-delay long-polling."""
+def ingest_video(ctx: click.Context, video_path: str, site_id: str, camera_id: str, out_format: str):
+    """Submit a video clip (file or URL) and poll until the verdict."""
     client = _require_client(ctx)
     target_site_id, camera_id = _site_and_camera(client, site_id, camera_id)
-    console.print(f"[dim]Sending {Path(video_path).name} from {target_site_id}/{camera_id}...[/dim]")
+    name_label = video_path if video_path.startswith(("http://", "https://")) else Path(video_path).name
+    if out_format != "json":
+        console.print(f"[dim]Sending {name_label} from {target_site_id}/{camera_id}...[/dim]")
     try:
         verdict, submit_ms, total_ms = client.ingest_video_and_poll(
-            video_path=Path(video_path),
+            video_path=video_path,
             site_id=target_site_id,
             camera_id=camera_id,
-            zone=zone,
-            site_type=site_type,
         )
-        console.print(f"[dim]Submit Ack: {submit_ms}ms  ·  Total Polling TTC: {total_ms}ms[/dim]")
-        if out_format == "json":
-            console.print(json.dumps(verdict, indent=2))
-        else:
-            render_verdict_card(verdict, wall_time_ms=total_ms)
+        if out_format != "json":
+            console.print(f"[dim]Submit Ack: {submit_ms}ms  ·  Total Polling TTC: {total_ms}ms[/dim]")
+        _emit_verdict(verdict, out_format=out_format, wall_ms=total_ms)
     except Exception as exc:
         console.print(f"[bold red]Video ingestion failed:[/bold red] {exc}")
         sys.exit(1)

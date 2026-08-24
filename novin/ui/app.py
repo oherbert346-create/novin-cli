@@ -23,7 +23,7 @@ from textual.widgets import (
 
 from novin.client.api_client import NovinClient
 from novin.client import session as cli_session
-from novin.ui.labels import DELIVERY_INTRO, DELIVERY_KIND_LABELS, ENVIRONMENT_LABELS, SITE_TYPES
+from novin.ui.labels import DELIVERY_INTRO, DELIVERY_KIND_LABELS, ENVIRONMENT_LABELS
 
 
 def _active_site_id() -> str:
@@ -487,7 +487,7 @@ class NovinApp(App[None]):
         environment = None if env_val is Select.BLANK else str(env_val)
         brief = self.query_one("#brief", TextArea).text.strip()
         cameras = _camera_list(self.query_one("#cameras", Input).value)
-        self._save_site_work(site_id, name, hours or None, environment, brief, cameras)
+        self._save_site_work(site_id, name, hours, environment, brief, cameras)
 
     def start_delete_site(self) -> None:
         site_id = self.query_one("#site-id", Input).value.strip()
@@ -523,12 +523,11 @@ class NovinApp(App[None]):
         brief: str,
         cameras: list[str],
     ) -> None:
-        site_type = environment if environment in SITE_TYPES else "office_retail"
         try:
             res = self.novin.setup_site(
                 site_id=site_id,
                 site_name=name,
-                site_type=site_type,
+                site_type=environment or "",
                 expected_hours=hours,
                 environment=environment,
                 brief=brief,
@@ -642,10 +641,7 @@ class NovinApp(App[None]):
                 "",
             )
             shown = name or self.delivery_site_id
-            label = (
-                f"[b]{shown}[/b] — these URLs get alerts from this site only. "
-                "Brand URLs still fire too."
-            )
+            label = f"[b]{shown}[/b] — these URLs get alerts from this site only"
         try:
             self.query_one("#delivery-selected", Static).update(label)
         except Exception:
@@ -658,9 +654,9 @@ class NovinApp(App[None]):
         table.clear()
         if not dests:
             empty = (
-                "None yet. Alerts stay in Incidents until you add a URL."
+                "None yet. Alerts stay in Incidents unless a site has its own URL."
                 if is_brand
-                else "None yet. This site still uses brand URLs."
+                else "None yet. This site has no extra URLs. Brand URLs still apply if set."
             )
             table.add_row("—", empty, "", key="empty")
         for item in dests:
@@ -681,9 +677,9 @@ class NovinApp(App[None]):
             )
         else:
             status = (
-                f"{len(dests)} URL(s) for this site, plus brand. All of them POST in parallel."
+                f"{len(dests)} URL(s) for this site only. Brand URLs are a separate row."
                 if dests
-                else "No extra URLs on this site. Alerts still go to brand URLs."
+                else "No URLs on this site. Brand URLs still apply if the brand row has any."
             )
         self._set_site_dest_result(status)
 

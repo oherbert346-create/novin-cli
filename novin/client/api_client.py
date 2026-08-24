@@ -267,40 +267,8 @@ class NovinClient:
         zone: str | None = None,
         site_type: str | None = None,
     ) -> dict[str, Any]:
-        """Put harness facts on `site` from local cache, then apply explicit overrides."""
-        cached = (self._get_active_site_config().get("sites") or {}).get(site_id) or {}
+        """Lean ingest site: id + camera. Server hydrates TUI harness from DigitalSite."""
         site: dict[str, Any] = {"site_id": site_id}
-        for key in (
-            "site_name",
-            "site_type",
-            "environment",
-            "focus",
-            "output_depth",
-            "expected_hours",
-            "timezone",
-            "restricted_zones",
-            "critical_assets",
-            "known_benign_patterns",
-            "temporary_notes",
-            "site_policies",
-            "secondary_focuses",
-            "brief",
-            "cameras",
-        ):
-            value = cached.get(key)
-            if value not in (None, "", []):
-                site[key] = value
-        if cached.get("brand_metadata") and isinstance(cached["brand_metadata"], dict):
-            meta = cached["brand_metadata"]
-            policies = meta.get("policies")
-            if policies and "site_policies" not in site:
-                site["site_policies"] = policies
-            if meta.get("brief") and "brief" not in site:
-                site["brief"] = meta["brief"]
-        if site_type:
-            site["site_type"] = site_type
-        if zone:
-            site["zone"] = zone
         if camera_id:
             site["camera_id"] = camera_id
             site["stream_id"] = camera_id
@@ -310,8 +278,8 @@ class NovinClient:
         self,
         site_id: str,
         site_name: str = "",
-        site_type: str = "office_retail",
-        environment_class: str = "office_low_risk",
+        site_type: str = "",
+        environment_class: str | None = None,
         expected_hours: str | None = None,
         timezone: str | None = None,
         restricted_zones: list[str] | None = None,
@@ -326,41 +294,20 @@ class NovinClient:
         cameras: list[str] | None = None,
         output_depth: str | None = None,
     ) -> dict[str, Any]:
-        """Create or configure a digital site with operational context."""
-        payload = {
+        """Create or configure a TUI site: id, name, world, hours, cameras, brief."""
+        payload: dict[str, Any] = {
             "site_name": site_name or site_id,
-            "site_type": site_type,
-            "environment_class": environment_class,
         }
-        if expected_hours:
-            payload["expected_hours"] = expected_hours
-        if restricted_zones:
-            payload["restricted_zones"] = list(restricted_zones)
-        if critical_assets:
-            payload["critical_assets"] = list(critical_assets)
-        if known_benign_patterns:
-            payload["known_benign_patterns"] = list(known_benign_patterns)
-        if temporary_notes:
-            payload["temporary_notes"] = list(temporary_notes)
-        if timezone:
-            payload["timezone"] = timezone
-        if environment:
-            payload["environment"] = environment
-        if focus:
-            payload["focus"] = focus
-        if secondary_focuses:
-            payload["secondary_focuses"] = list(secondary_focuses)[:2]
+        world = (environment or site_type or "").strip()
+        if world:
+            payload["environment"] = world
+            payload["site_type"] = world
+        if expected_hours is not None:
+            payload["expected_hours"] = expected_hours.strip() or None
         if brief is not None:
             payload["brief"] = brief.strip()
         if cameras is not None:
             payload["cameras"] = [c.strip() for c in cameras if str(c).strip()]
-        if output_depth:
-            payload["output_depth"] = output_depth
-        if policies:
-            # Standing "alert when…" instructions ride in brand_metadata — the
-            # server hydrates them into site_context["site_policies"].
-            payload["site_policies"] = list(policies)
-            payload["brand_metadata"] = {"policies": list(policies)}
         self._save_local_site_config(site_id, payload)
         with httpx.Client(timeout=15.0) as client:
             r = client.put(
@@ -505,20 +452,21 @@ class NovinClient:
         deliver_to: list[str] | None = None,
         beta: bool = False,
     ) -> tuple[dict[str, Any], float]:
-        """Synchronously ingest a single image and return (verdict_dict, wall_time_ms)."""
-        if isinstance(image_path_or_b64, Path) or (isinstance(image_path_or_b64, str) and os.path.exists(image_path_or_b64)):
-            p = Path(image_path_or_b64)
-            b64_str = base64.b64encode(p.read_bytes()).decode("ascii")
+        """Synchronously ingest a single image (file, URL, or base64)."""
+        raw_str = str(image_path_or_b64).strip()
+        if raw_str.startswith(("http://", "https://")):
+            media_val: dict[str, Any] = {"image_urls": [raw_str]}
+        elif os.path.exists(raw_str):
+            p = Path(raw_str)
+            media_val = {"image_b64": [base64.b64encode(p.read_bytes()).decode("ascii")]}
         else:
-            b64_str = str(image_path_or_b64)
+            media_val = {"image_b64": [raw_str]}
 
         payload: dict[str, Any] = {
             "brand_id": self.brand_id,
             "external_ref": external_ref or f"ingest-{int(time.time())}",
-            "site": self._site_payload_for_ingest(
-                site_id, camera_id=camera_id, zone=zone, site_type=site_type
-            ),
-            "media": {"image_b64": [b64_str]},
+            "site": self._site_payload_for_ingest(site_id, camera_id=camera_id),
+            "media": media_val,
         }
         ctx_payload: dict[str, Any] = {}
         if after_hours:
@@ -602,18 +550,27 @@ class NovinClient:
         max_poll_sec: float = 30.0,
     ) -> tuple[dict[str, Any], float, float]:
         """Submit multi-frame burst (HTTP 202) and execute zero-delay long-polling."""
-        b64_list = []
+        media_urls: list[str] = []
+        b64_list: list[str] = []
         for img in image_paths:
-            p = Path(img)
-            b64_list.append(base64.b64encode(p.read_bytes()).decode("ascii"))
+            s_img = str(img).strip()
+            if s_img.startswith(("http://", "https://")):
+                media_urls.append(s_img)
+            elif os.path.exists(s_img):
+                b64_list.append(base64.b64encode(Path(s_img).read_bytes()).decode("ascii"))
+            else:
+                b64_list.append(s_img)
+        media_payload: dict[str, Any] = {}
+        if media_urls:
+            media_payload["image_urls"] = media_urls
+        if b64_list:
+            media_payload["image_b64"] = b64_list
 
         payload = {
             "brand_id": self.brand_id,
             "external_ref": external_ref or f"burst-{int(time.time())}",
-            "site": self._site_payload_for_ingest(
-                site_id, camera_id=camera_id, zone=zone, site_type=site_type
-            ),
-            "media": {"image_b64": b64_list},
+            "site": self._site_payload_for_ingest(site_id, camera_id=camera_id),
+            "media": media_payload,
         }
 
         with httpx.Client(timeout=self.timeout_sec) as client:
@@ -664,16 +621,21 @@ class NovinClient:
         max_poll_sec: float = 45.0,
     ) -> tuple[dict[str, Any], float, float]:
         """Submit video clip (HTTP 202) and execute zero-delay long-polling."""
-        p = Path(video_path)
-        b64_video = base64.b64encode(p.read_bytes()).decode("ascii")
+        s_video = str(video_path).strip()
+        if s_video.startswith(("http://", "https://")):
+            media_payload: dict[str, Any] = {"video_url": s_video}
+        elif os.path.exists(s_video):
+            media_payload = {
+                "video_file_b64": base64.b64encode(Path(s_video).read_bytes()).decode("ascii")
+            }
+        else:
+            media_payload = {"video_file_b64": s_video}
 
         payload = {
             "brand_id": self.brand_id,
             "external_ref": external_ref or f"video-{int(time.time())}",
-            "site": self._site_payload_for_ingest(
-                site_id, camera_id=camera_id, zone=zone, site_type=site_type
-            ),
-            "media": {"video_file_b64": b64_video},
+            "site": self._site_payload_for_ingest(site_id, camera_id=camera_id),
+            "media": media_payload,
         }
 
         with httpx.Client(timeout=self.timeout_sec) as client:

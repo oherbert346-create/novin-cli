@@ -26,16 +26,7 @@ FOCUS_LABELS = {
 ENV_HELP = "Camera world. " + ", ".join(f"{k} ({v})" for k, v in ENVIRONMENT_LABELS.items())
 FOCUS_HELP = "Primary security job. " + ", ".join(f"{k} ({v})" for k, v in FOCUS_LABELS.items())
 
-SITE_TYPES = (
-    "office",
-    "warehouse",
-    "industrial",
-    "retail",
-    "school",
-    "transit",
-    "construction",
-    "residential",
-)
+SITE_TYPES = tuple(ENVIRONMENT_LABELS.keys())
 
 DELIVERY_KIND_LABELS = {
     "auto": "Detect from the URL",
@@ -48,8 +39,9 @@ DELIVERY_KIND_LABELS = {
 }
 
 DELIVERY_INTRO = (
-    "[b]When Novin alerts, it POSTs the verdict to these URLs — all at once.[/b]\n"
-    "[dim]Brand = every site. A site row = that site only, and brand still fires.\n"
+    "[b]When Novin alerts, it POSTs the verdict to these URLs.[/b]\n"
+    "[dim]Brand = every site. A site row = that site only — never another site.\n"
+    "An alert for a site is sent to brand URLs and that site's URLs. Other sites stay out.\n"
     "Slack / Teams / Discord: paste the webhook (the secret is in the URL).\n"
     "Any other HTTPS API: paste the endpoint; attach a key only if that API needs one.[/dim]"
 )
