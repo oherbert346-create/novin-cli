@@ -39,9 +39,6 @@ DELIVERY_KIND_LABELS = {
 }
 
 DELIVERY_INTRO = (
-    "[b]When Novin alerts, it POSTs the verdict to these URLs.[/b]\n"
-    "[dim]Brand = every site. A site row = that site only — never another site.\n"
-    "An alert for a site is sent to brand URLs and that site's URLs. Other sites stay out.\n"
-    "Slack / Teams / Discord: paste the webhook (the secret is in the URL).\n"
-    "Any other HTTPS API: paste the endpoint; attach a key only if that API needs one.[/dim]"
+    "[b]Brand[/b] is one URL for every site. Click a site to set URLs for that site only.\n"
+    "[dim]Paste a Slack webhook, or any HTTPS API. Add a key only if that API needs one.[/dim]"
 )

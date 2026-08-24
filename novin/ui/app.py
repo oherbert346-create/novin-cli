@@ -78,19 +78,20 @@ def _kind_label(kind: str | None) -> str:
     return DELIVERY_KIND_LABELS.get(key, key or "JSON API")
 
 
+def _dest_auth_label(item: dict[str, Any]) -> str:
+    kind = str(item.get("kind") or "")
+    if item.get("auth_attached") or item.get("api_key"):
+        return "API key"
+    if kind in {"slack", "teams", "discord", "slack_api"}:
+        return "in URL"
+    return "—"
+
+
 def _dest_summary(row: dict[str, Any], *, is_brand: bool = False) -> str:
     dests = _destinations_of(row)
     if not dests:
-        return "no URLs yet" if is_brand else "brand URLs only"
-    labels: list[str] = []
-    for item in dests:
-        label = _kind_label(item.get("kind"))
-        if label not in labels:
-            labels.append(label)
-    count = len(dests)
-    joined = " + ".join(labels)
-    extra = "" if is_brand else " + brand"
-    return f"{count} · {joined}{extra}"
+        return "—"
+    return dests[0].get("url") or "—"
 
 
 class HomePane(Vertical):
@@ -192,65 +193,28 @@ class SitePane(VerticalScroll):
             app.start_delete_site()
 
 
-class DeliveryPane(Vertical):
+class DeliveryPane(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Static(DELIVERY_INTRO, id="delivery-hint")
         table = DataTable(id="delivery-table", cursor_type="row", zebra_stripes=True)
-        table.add_columns("Who", "Alerts for", "Sends")
+        table.add_columns("Who", "URL", "Key")
         yield table
         yield Static("Brand — every site", id="delivery-selected")
-        yield Static(
-            "[dim]URLs for the row above. Click one to remove it. Slack needs no key; a private API might.[/dim]",
-            id="delivery-urls-hint",
-        )
-        urls = DataTable(id="dest-urls-table", cursor_type="row", zebra_stripes=True)
-        urls.add_columns("Format", "Address", "Auth")
-        yield urls
-        yield Label("Where to send (HTTPS URL)")
+        yield Label("URL")
         yield Input(
             "",
             id="dest-url",
-            placeholder="Slack: hooks.slack.com/services/…   API: https://your-service/events",
+            placeholder="https://hooks.slack.com/…  or  https://your-api/events",
         )
-        yield Label("What they receive")
-        yield Select(
-            (
-                ("Detect from the URL (Slack/Teams/Discord vs JSON)", "auto"),
-                ("Slack / Teams / Discord chat message", "slack"),
-                ("JSON API (the Novin verdict body)", "json"),
-            ),
-            value="auto",
-            allow_blank=False,
-            id="dest-kind",
-        )
-        yield Label("API key — only for a private API, not a Slack webhook")
-        yield Input(
-            "",
-            id="dest-key",
-            password=True,
-            placeholder="optional · stored with this URL · sent on every alert",
-        )
+        yield Label("API key (optional — only if the URL needs one)")
+        yield Input("", id="dest-key", password=True, placeholder="leave blank for Slack")
         yield Horizontal(
-            Button("Add this URL", id="add-dest", variant="primary"),
-            Button("Remove selected", id="remove-dest", variant="error"),
+            Button("Add URL", id="add-dest", variant="primary"),
+            Button("Remove", id="remove-dest", variant="error"),
             Button("Refresh", id="refresh-delivery"),
             id="site-dest-actions",
         )
         yield Static(id="site-dest-result")
-        yield Label("When to send")
-        yield Horizontal(
-            Select(
-                (
-                    ("Alerts only — threats. Quiet scenes stay in Incidents.", "alerts"),
-                    ("Alerts and all-clears — every verdict is posted.", "all"),
-                ),
-                value="alerts",
-                allow_blank=False,
-                id="push-mode",
-            ),
-            Button("Save when-to-send", id="save-push"),
-            id="brand-actions",
-        )
 
     def on_mount(self) -> None:
         app = self.app
@@ -267,25 +231,23 @@ class DeliveryPane(Vertical):
             app.start_remove_destination()
         elif event.button.id == "refresh-delivery":
             app.load_delivery()
-        elif event.button.id == "save-push":
-            app.start_save_push()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         app = self.app
         assert isinstance(app, NovinApp)
-        if event.data_table.id == "delivery-table":
-            site_id = str(event.row_key.value) if event.row_key else ""
-            if not site_id or site_id in {"error", "empty"}:
-                return
-            app.select_delivery_site(site_id)
-        elif event.data_table.id == "dest-urls-table":
-            url = str(event.row_key.value) if event.row_key else ""
-            if url and url not in {"error", "empty"}:
-                app.delivery_url = url
-                try:
-                    self.query_one("#dest-url", Input).value = url
-                except Exception:
-                    pass
+        if event.data_table.id != "delivery-table":
+            return
+        key = str(event.row_key.value) if event.row_key else ""
+        if not key or key in {"error", "empty"}:
+            return
+        scope, _, url = key.partition("|")
+        app.select_delivery_site(scope)
+        if url:
+            app.delivery_url = url
+            try:
+                self.query_one("#dest-url", Input).value = url
+            except Exception:
+                pass
 
 
 class IncidentsPane(Vertical):
@@ -320,7 +282,7 @@ class NovinApp(App[None]):
     Footer { background: #1c1916; }
     #home-banner { padding: 1 1 0 1; }
     #home-hint { padding: 0 1 1 1; color: #8a837a; height: auto; }
-    #home-actions, #inc-actions, #site-actions, #brand-actions, #site-dest-actions {
+    #home-actions, #inc-actions, #site-actions, #site-dest-actions {
         padding: 1;
         height: auto;
     }
@@ -330,15 +292,14 @@ class NovinApp(App[None]):
     DeliveryPane { height: 1fr; }
     Input, Select { margin-bottom: 1; }
     #brief { height: 10; margin-bottom: 1; }
-    #brief-hint, #delivery-hint, #delivery-urls-hint {
+    #brief-hint, #delivery-hint {
         color: #8a837a;
         margin-bottom: 1;
         height: auto;
     }
     #delivery-hint { color: #ece6dc; }
-    #delivery-selected { padding: 1 0 0 0; height: auto; }
-    #delivery-table { height: 1fr; min-height: 8; margin: 0 0 1 0; }
-    #dest-urls-table { height: 8; margin: 0 0 1 0; }
+    #delivery-selected { padding: 1 0 1 0; height: auto; }
+    #delivery-table { height: auto; min-height: 6; max-height: 18; margin: 0 0 1 0; }
     #site-dest-result, #site-result { height: auto; margin-bottom: 1; }
     Label { color: #b7b0a6; }
     """
@@ -580,11 +541,6 @@ class NovinApp(App[None]):
         self.brand_setup = brand or {}
         if sites:
             self.sites = sites
-        try:
-            push = brand.get("push_actions") or []
-            self.query_one("#push-mode", Select).value = "all" if "suppress" in push else "alerts"
-        except Exception:
-            pass
         self._fill_delivery_table(sites if sites else self.sites, brand)
         self.select_delivery_site(self.delivery_site_id or BRAND_SCOPE)
         if err:
@@ -599,12 +555,18 @@ class NovinApp(App[None]):
             return
         table.clear()
         brand = brand if brand is not None else self.brand_setup
-        table.add_row(
-            "brand",
-            "every site",
-            _dest_summary(brand, is_brand=True),
-            key=BRAND_SCOPE,
-        )
+        brand_dests = _destinations_of(brand)
+        if brand_dests:
+            for item in brand_dests:
+                url = str(item.get("url") or "")
+                table.add_row(
+                    "Brand · all sites",
+                    url,
+                    _dest_auth_label(item),
+                    key=f"{BRAND_SCOPE}|{url}",
+                )
+        else:
+            table.add_row("Brand · all sites", "—", "", key=f"{BRAND_SCOPE}|")
         if not sites:
             table.add_row("—", "No sites yet. Add one on Sites.", "", key="empty")
             return
@@ -613,13 +575,14 @@ class NovinApp(App[None]):
             if not sid:
                 continue
             name = str(row.get("site_name") or sid)
-            who = name if name == sid else f"{name}  ({sid})"
-            table.add_row(
-                who,
-                "this site only",
-                _dest_summary(row),
-                key=sid,
-            )
+            who = sid if name == sid else name
+            dests = _destinations_of(row)
+            if dests:
+                for item in dests:
+                    url = str(item.get("url") or "")
+                    table.add_row(who, url, _dest_auth_label(item), key=f"{sid}|{url}")
+            else:
+                table.add_row(who, "—", "", key=f"{sid}|")
 
     def _scope_destinations(self) -> list[dict[str, Any]]:
         if self.delivery_site_id == BRAND_SCOPE:
@@ -631,67 +594,33 @@ class NovinApp(App[None]):
         return _destinations_of(match)
 
     def select_delivery_site(self, site_id: str) -> None:
-        self.delivery_site_id = site_id or BRAND_SCOPE
+        raw = site_id or BRAND_SCOPE
+        if "|" in raw and not raw.startswith("http"):
+            raw = raw.split("|", 1)[0]
+        self.delivery_site_id = raw or BRAND_SCOPE
         is_brand = self.delivery_site_id == BRAND_SCOPE
         if is_brand:
-            label = "[b]Brand[/b] — these URLs get alerts from every site"
+            label = "[b]Brand[/b] — this URL is used for every site"
         else:
             name = next(
                 (str(row.get("site_name") or "") for row in self.sites if str(row.get("site_id")) == self.delivery_site_id),
                 "",
             )
             shown = name or self.delivery_site_id
-            label = f"[b]{shown}[/b] — these URLs get alerts from this site only"
+            label = f"[b]{shown}[/b] — URLs for this site only"
         try:
             self.query_one("#delivery-selected", Static).update(label)
         except Exception:
             pass
-        dests = self._scope_destinations()
-        try:
-            table = self.query_one("#dest-urls-table", DataTable)
-        except Exception:
-            return
-        table.clear()
-        if not dests:
-            empty = (
-                "None yet. Alerts stay in Incidents unless a site has its own URL."
-                if is_brand
-                else "None yet. This site has no extra URLs. Brand URLs still apply if set."
-            )
-            table.add_row("—", empty, "", key="empty")
-        for item in dests:
-            url = str(item.get("url") or "")
-            kind = str(item.get("kind") or "json")
-            if item.get("auth_attached") or item.get("api_key"):
-                auth = "API key attached"
-            elif kind in {"slack", "teams", "discord", "slack_api"}:
-                auth = "in the URL"
-            else:
-                auth = "none"
-            table.add_row(_kind_label(kind), url, auth, key=url)
-        if is_brand:
-            status = (
-                f"{len(dests)} URL(s) for every site. Each alert POSTs to all of them at once."
-                if dests
-                else "No brand URLs. Add one, or set URLs on each site."
-            )
-        else:
-            status = (
-                f"{len(dests)} URL(s) for this site only. Brand URLs are a separate row."
-                if dests
-                else "No URLs on this site. Brand URLs still apply if the brand row has any."
-            )
-        self._set_site_dest_result(status)
 
     def start_add_destination(self) -> None:
         url = self.query_one("#dest-url", Input).value.strip()
         if not url:
-            self._set_site_dest_result("[red]Paste a Slack or API URL first.[/red]")
+            self._set_site_dest_result("[red]Paste a URL first.[/red]")
             return
-        kind = str(self.query_one("#dest-kind", Select).value or "auto")
         key = self.query_one("#dest-key", Input).value.strip()
         site_id = None if self.delivery_site_id == BRAND_SCOPE else self.delivery_site_id
-        self._add_dest_work(url, site_id, kind, key)
+        self._add_dest_work(url, site_id, "auto", key)
 
     def start_remove_destination(self) -> None:
         url = self.delivery_url.strip() or self.query_one("#dest-url", Input).value.strip()
@@ -700,11 +629,6 @@ class NovinApp(App[None]):
             return
         site_id = None if self.delivery_site_id == BRAND_SCOPE else self.delivery_site_id
         self._remove_dest_work(url, site_id)
-
-    def start_save_push(self) -> None:
-        mode = str(self.query_one("#push-mode", Select).value or "alerts")
-        actions = ["alert", "review", "suppress"] if mode == "all" else ["alert", "review"]
-        self._save_push_work(actions)
 
     @work(thread=True, exclusive=True, group="delivery")
     def _add_dest_work(self, url: str, site_id: str | None, kind: str, api_key: str) -> None:
@@ -729,15 +653,6 @@ class NovinApp(App[None]):
         except Exception as exc:
             msg = f"[red]Could not remove[/red]  {exc}"
         self.call_from_thread(self._after_dest_change, msg, True)
-
-    @work(thread=True, exclusive=True, group="delivery")
-    def _save_push_work(self, actions: list[str]) -> None:
-        try:
-            self.novin.setup_brand(push_actions=actions)
-            msg = "[green]Saved what Novin sends.[/green] Alerts always go out; all-clears only if you chose that."
-        except Exception as exc:
-            msg = f"[red]Could not save push[/red]  {exc}"
-        self.call_from_thread(self._after_dest_change, msg, False)
 
     def _after_dest_change(self, msg: str, clear_inputs: bool = False) -> None:
         if clear_inputs:
