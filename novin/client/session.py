@@ -83,13 +83,14 @@ def save_session(
 
 
 def clear_session() -> None:
-    """Sign out. Keeps the brand account on this machine so the next login uses the API key."""
+    """Sign out as a fresh machine: drop session, brand account, and local sites."""
     try:
         path = session_path()
         if path.exists():
             path.unlink()
     except OSError:
         pass
+    save_config({"sites": {}, "active_site_id": ""})
 
 
 def has_brand_account() -> bool:

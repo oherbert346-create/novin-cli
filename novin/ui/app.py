@@ -337,7 +337,7 @@ class NovinApp(App[None]):
 
     def action_logout(self) -> None:
         cli_session.clear_session()
-        self.notify("Signed out. Run novin and paste your API key.")
+        self.notify("Signed out. This machine is clear. Run novin and paste your key.")
         self.exit()
 
     def start_new_site(self) -> None:

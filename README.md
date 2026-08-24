@@ -38,7 +38,7 @@ novin ingest image ./frame.jpg
 
 after you add a site once. Site and camera are filled in from that.
 
-If you sign out, or use another computer, paste the **API key** we showed you — not the master key.
+If you sign out, this machine is cleared. Next `novin` is a fresh login: paste the **API key** we showed you (or a master key to create a brand).
 
 A new install always gets the current terminal. If you already have it, it stays as-is until you update.
 

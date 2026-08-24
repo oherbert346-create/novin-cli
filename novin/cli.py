@@ -64,9 +64,8 @@ def _login_interactive(*, first_time: bool, api_url: str, brand_id: str | None) 
     console.print()
     if first_time:
         console.print("[bold]Welcome to Novin.[/bold]")
-        console.print("Paste the [cyan]master key[/cyan] Novin gave you.")
-        console.print("We'll create your brand and give you an API key for sending events.")
-        prompt = "Master key: "
+        console.print("Paste the [cyan]key[/cyan] Novin gave you.")
+        prompt = "Key: "
     else:
         brand = (brand_id or cli_session.saved_brand_id()).strip() or "default"
         console.print("[bold]Welcome back.[/bold]")
@@ -203,8 +202,8 @@ class _NovinGroup(click.Group):
 def cli(ctx: click.Context, api_url: str | None, api_key: str | None, brand_id: str | None):
     """Open the Novin terminal UI on this machine.
 
-    Run `novin` with no arguments. First time: master key, then a brand name.
-    We generate your API key. After that, this machine stays signed in.
+    Run `novin` with no arguments. Paste the key Novin gave you.
+    A master key creates a brand. An API key signs you in.
     """
     ctx.ensure_object(dict)
     ctx.obj["api_url"] = api_url
@@ -232,15 +231,12 @@ def login_cmd(ctx: click.Context):
 
 @cli.command("logout")
 def logout_cmd():
-    """Sign out (next time use your API key)."""
+    """Sign out and clear this machine. Next run is a fresh login."""
     cli_session.clear_session()
-    if cli_session.has_brand_account():
-        console.print(
-            f"[green]Signed out.[/green] Run [bold]novin[/bold] and paste the "
-            f"API key for brand [bold]{cli_session.saved_brand_id()}[/bold]."
-        )
-    else:
-        console.print("[green]Signed out.[/green] Run [bold]novin[/bold] and paste your master key.")
+    console.print(
+        "[green]Signed out.[/green] This machine is clear. "
+        "Run [bold]novin[/bold] and paste your key."
+    )
 
 
 @cli.command("update")
