@@ -58,15 +58,26 @@ def _cached_sites() -> list[dict[str, Any]]:
     return out
 
 
+def _is_locked_tap(url: str) -> bool:
+    u = str(url or "").strip().rstrip("/")
+    return u.endswith("/api/v1/tap/events")
+
+
 def _destinations_of(row: dict[str, Any] | None) -> list[dict[str, Any]]:
     data = row or {}
     dests = data.get("destinations")
     if isinstance(dests, list):
-        items = [item for item in dests if isinstance(item, dict) and item.get("url")]
+        items = [
+            item
+            for item in dests
+            if isinstance(item, dict)
+            and item.get("url")
+            and not _is_locked_tap(str(item.get("url") or ""))
+        ]
         if items:
             return items
     url = str(data.get("webhook_url") or "").strip()
-    if url:
+    if url and not _is_locked_tap(url):
         return [{"url": url, "kind": "json", "auth_attached": bool(data.get("webhook_verified"))}]
     return []
 
@@ -602,6 +613,9 @@ class NovinApp(App[None]):
         url = self.delivery_url.strip() or self.query_one("#dest-url", Input).value.strip()
         if not url:
             self._set_site_dest_result("[red]Click a destination URL to remove.[/red]")
+            return
+        if _is_locked_tap(url):
+            self._set_site_dest_result("[dim]That destination is locked.[/dim]")
             return
         site_id = None if self.delivery_site_id == BRAND_SCOPE else self.delivery_site_id
         self._remove_dest_work(url, site_id)
