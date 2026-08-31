@@ -5,6 +5,7 @@ import os
 import sys
 from getpass import getpass
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.console import Console
@@ -281,16 +282,16 @@ def setup_check(ctx: click.Context):
         console.print("[red]Could not reach Novin from this machine.[/red]")
 
 
-@setup.command("site")
-@click.argument("site_id")
-@click.option("--name", default="", help="Human-readable site name")
-@click.option("--hours", default=None, help="Expected operating hours (optional; omit if none)")
-@click.option("--camera", "cameras", multiple=True, help="Camera id this site owns (repeatable)")
-@click.option("--environment", default="", help=_ENV_HELP)
-@click.option("--brief", "--context", "brief", default="", help="Natural-language site context. What is normal here and what to watch for.")
-@click.pass_context
-def setup_site(ctx: click.Context, site_id: str, name: str, hours: str | None, cameras: tuple[str, ...], environment: str, brief: str):
-    """Create or update a site (same fields as the terminal: id, name, world, hours, cameras, context)."""
+def _do_setup_site(
+    ctx: click.Context,
+    site_id: str,
+    name: str,
+    hours: str | None,
+    cameras: tuple[str, ...],
+    environment: str,
+    brief: str,
+    policies: tuple[str, ...],
+) -> dict[str, Any]:
     client = _require_client(ctx)
     console.print(f"[cyan]Provisioning site[/cyan] [bold]{site_id}[/bold]...")
     res = client.setup_site(
@@ -300,37 +301,81 @@ def setup_site(ctx: click.Context, site_id: str, name: str, hours: str | None, c
         environment=environment or None,
         brief=brief or None,
         cameras=list(cameras) if cameras else None,
+        policies=list(policies) if policies else None,
     )
     console.print(f"[bold green]✓ Site Registered:[/bold green] {res.get('site_id')} (Brand: {res.get('brand_id')})")
     if res.get("message"):
         console.print(f"[dim]{res.get('message')}[/dim]")
+    return res
 
 
-@setup.command("delete-site")
+@setup.command("site")
 @click.argument("site_id")
+@click.option("--name", default="", help="Human-readable site name")
+@click.option("--hours", default=None, help="Expected operating hours (optional; omit if none)")
+@click.option("--camera", "cameras", multiple=True, help="Camera id this site owns (repeatable)")
+@click.option("--environment", default="", help=_ENV_HELP)
+@click.option("--brief", "--context", "brief", default="", help="Natural-language site context. What is normal here and what to watch for.")
+@click.option("--policy", "policies", multiple=True, help="Standing alert policy for this site (repeatable)")
 @click.pass_context
-def setup_delete_site(ctx: click.Context, site_id: str):
-    """Delete one site for this brand."""
+def setup_site(
+    ctx: click.Context,
+    site_id: str,
+    name: str,
+    hours: str | None,
+    cameras: tuple[str, ...],
+    environment: str,
+    brief: str,
+    policies: tuple[str, ...],
+):
+    """Create or update a site (same fields as the terminal: id, name, world, hours, cameras, context, policies)."""
+    _do_setup_site(ctx, site_id, name, hours, cameras, environment, brief, policies)
+
+
+@cli.group("site")
+def site():
+    """Site management and configuration commands."""
+    pass
+
+
+@site.command("setup")
+@click.argument("site_id")
+@click.option("--name", default="", help="Human-readable site name")
+@click.option("--hours", default=None, help="Expected operating hours (optional; omit if none)")
+@click.option("--camera", "cameras", multiple=True, help="Camera id this site owns (repeatable)")
+@click.option("--environment", default="", help=_ENV_HELP)
+@click.option("--brief", "--context", "brief", default="", help="Natural-language site context. What is normal here and what to watch for.")
+@click.option("--policy", "policies", multiple=True, help="Standing alert policy for this site (repeatable)")
+@click.pass_context
+def site_setup(
+    ctx: click.Context,
+    site_id: str,
+    name: str,
+    hours: str | None,
+    cameras: tuple[str, ...],
+    environment: str,
+    brief: str,
+    policies: tuple[str, ...],
+):
+    """Create or update a site (alias for `novin setup site`)."""
+    _do_setup_site(ctx, site_id, name, hours, cameras, environment, brief, policies)
+
+
+def _do_delete_site(ctx: click.Context, site_id: str) -> dict[str, Any]:
     client = _require_client(ctx)
     res = client.delete_site(site_id)
     console.print(f"[green]Deleted[/green] {res.get('site_id')} for brand {res.get('brand_id')}")
+    return res
 
 
-@setup.command("restore-site")
-@click.argument("site_id")
-@click.pass_context
-def setup_restore_site(ctx: click.Context, site_id: str):
-    """Restore a soft-deleted site for this brand."""
+def _do_restore_site(ctx: click.Context, site_id: str) -> dict[str, Any]:
     client = _require_client(ctx)
     res = client.restore_site(site_id)
     console.print(f"[green]Restored[/green] {res.get('site_id') or site_id}")
+    return res
 
 
-@setup.command("wipe-sites")
-@click.option("--yes", is_flag=True, help="Confirm wipe of every site for this brand")
-@click.pass_context
-def setup_wipe_sites(ctx: click.Context, yes: bool):
-    """Delete every site for this brand."""
+def _do_wipe_sites(ctx: click.Context, yes: bool) -> dict[str, Any]:
     if not yes:
         console.print("Pass --yes to delete every site for this brand.")
         raise SystemExit(1)
@@ -339,6 +384,55 @@ def setup_wipe_sites(ctx: click.Context, yes: bool):
     console.print(
         f"[green]Wiped[/green] {res.get('count', 0)} sites for brand {res.get('brand_id')}"
     )
+    return res
+
+
+@site.command("delete")
+@click.argument("site_id")
+@click.pass_context
+def site_delete(ctx: click.Context, site_id: str):
+    """Delete one site for this brand."""
+    _do_delete_site(ctx, site_id)
+
+
+@site.command("restore")
+@click.argument("site_id")
+@click.pass_context
+def site_restore(ctx: click.Context, site_id: str):
+    """Restore a soft-deleted site for this brand."""
+    _do_restore_site(ctx, site_id)
+
+
+@site.command("wipe")
+@click.option("--yes", is_flag=True, help="Confirm wipe of every site for this brand")
+@click.pass_context
+def site_wipe(ctx: click.Context, yes: bool):
+    """Delete every site for this brand."""
+    _do_wipe_sites(ctx, yes)
+
+
+@setup.command("delete-site")
+@click.argument("site_id")
+@click.pass_context
+def setup_delete_site(ctx: click.Context, site_id: str):
+    """Delete one site for this brand."""
+    _do_delete_site(ctx, site_id)
+
+
+@setup.command("restore-site")
+@click.argument("site_id")
+@click.pass_context
+def setup_restore_site(ctx: click.Context, site_id: str):
+    """Restore a soft-deleted site for this brand."""
+    _do_restore_site(ctx, site_id)
+
+
+@setup.command("wipe-sites")
+@click.option("--yes", is_flag=True, help="Confirm wipe of every site for this brand")
+@click.pass_context
+def setup_wipe_sites(ctx: click.Context, yes: bool):
+    """Delete every site for this brand."""
+    _do_wipe_sites(ctx, yes)
 
 
 @setup.command("brand")
