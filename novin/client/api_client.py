@@ -308,6 +308,10 @@ class NovinClient:
             payload["brief"] = brief.strip()
         if cameras is not None:
             payload["cameras"] = [c.strip() for c in cameras if str(c).strip()]
+        if policies is not None:
+            payload["brand_metadata"] = {
+                "policies": [p.strip() for p in policies if str(p).strip()]
+            }
         self._save_local_site_config(site_id, payload)
         with httpx.Client(timeout=15.0) as client:
             r = client.put(
